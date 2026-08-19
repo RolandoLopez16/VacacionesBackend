@@ -1,0 +1,347 @@
+openapi: 3.1.0
+info:
+  title: Vaca EFA API
+  version: 0.1.0
+  description: API del sistema de control de vacaciones, saldos derivados y trazabilidad laboral.
+servers:
+  - url: http://localhost:3000
+    description: Desarrollo local
+security:
+  - cookieAuth: []
+paths:
+  /api/v1/health:
+    get:
+      security: []
+      summary: Estado básico del servicio
+      responses:
+        '200': {description: Servicio disponible}
+  /api/v1/health/live:
+    get:
+      security: []
+      summary: Liveness probe
+      responses:
+        '200': {description: Proceso vivo}
+  /api/v1/health/ready:
+    get:
+      security: []
+      summary: Readiness probe y conexión de almacenamiento
+      responses:
+        '200': {description: Servicio listo}
+  /api/v1/auth/login:
+    post:
+      security: []
+      summary: Iniciar sesión
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200': {description: Sesión creada}
+        '401': {description: Credenciales inválidas}
+  /api/v1/auth/refresh:
+    post:
+      security: []
+      summary: Renovar cookies de sesión
+      responses:
+        '200': {description: Sesión renovada}
+        '401': {description: Refresh inválido o expirado}
+  /api/v1/auth/me:
+    get:
+      summary: Usuario de la sesión actual
+      responses: {'200': {description: Usuario autenticado}, '401': {description: Sesión inválida}}
+  /api/v1/auth/change-password:
+    post:
+      summary: Cambiar contraseña y revocar cookies actuales
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [currentPassword, newPassword], properties: {currentPassword: {type: string, format: password}, newPassword: {type: string, minLength: 8, format: password}}}}}
+      responses: {'204': {description: Contraseña cambiada}}
+  /api/v1/auth/logout:
+    post:
+      security: []
+      summary: Cerrar sesión
+      responses:
+        '204': {description: Sesión cerrada}
+  /api/v1/dashboard:
+    get:
+      summary: Indicadores y casos próximos a causar
+      parameters:
+        - {name: asOf, in: query, schema: {type: string, format: date}}
+        - {name: from, in: query, schema: {type: string, format: date}, description: Inicio del rango de vínculos activos}
+        - {name: to, in: query, schema: {type: string, format: date}, description: Fin del rango de vínculos activos}
+        - {name: status, in: query, schema: {type: string, enum: [ACTIVE, RETIRED]}}
+        - {name: process, in: query, schema: {type: string}}
+      responses:
+        '200': {description: Dashboard}
+  /api/v1/holidays:
+    get:
+      security: []
+      summary: Consultar festivos activos por año
+      parameters: [{name: year, in: query, schema: {type: integer, minimum: 2000}}]
+      responses: {'200': {description: Festivos configurados}}
+  /api/v1/admin/holidays:
+    get:
+      summary: Listar festivos administrativos
+      parameters: [{name: year, in: query, schema: {type: integer, minimum: 2000}}]
+      responses: {'200': {description: Festivos configurados}}
+    post:
+      summary: Crear festivo
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HolidayInput'}}}
+      responses: {'201': {description: Festivo creado}}
+  /api/v1/admin/holidays/{id}:
+    get:
+      summary: Obtener festivo
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {'200': {description: Festivo}, '404': {description: No encontrado}}
+    patch:
+      summary: Editar festivo
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HolidayPatch'}}}
+      responses: {'200': {description: Festivo actualizado}}
+    delete:
+      summary: Desactivar festivo conservando auditoría
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {'200': {description: Festivo desactivado}}
+  /api/v1/alerts:
+    get:
+      summary: Consultar alertas persistidas
+      parameters:
+        - {name: employmentId, in: query, schema: {type: string}}
+        - {name: active, in: query, schema: {type: boolean}}
+      responses: {'200': {description: Alertas}}
+  /api/v1/admin/scheduler-runs:
+    get:
+      summary: Consultar ejecuciones del scheduler
+      responses: {'200': {description: Ejecuciones persistidas}}
+  /api/v1/admin/retired-employments/close-pending:
+    post:
+      summary: Cerrar pendientes de vacaciones de vínculos retirados
+      description: Operación ADMIN idempotente. Lee períodos por lote, cierra el ciclo a la fecha de retiro y conserva auditoría.
+      responses:
+        '200': {description: Resultado de regularización}
+        '403': {description: Se requiere permiso administrativo}
+  /api/v1/employments:
+    get:
+      summary: Listar vínculos con filtros y paginación
+      parameters:
+        - {$ref: '#/components/parameters/Search'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: accrualWithin, in: query, schema: {type: integer, minimum: 0}}
+        - {name: status, in: query, schema: {type: string, enum: [ACTIVE, RETIRED]}}
+        - {name: process, in: query, schema: {type: string}}
+        - {name: alert, in: query, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, format: date}}
+        - {name: to, in: query, schema: {type: string, format: date}}
+      responses:
+        '200': {description: Colección paginada}
+    post:
+      summary: Crear o actualizar idempotentemente un vínculo
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/EmploymentInput'}}
+      responses:
+        '201': {description: Vínculo creado}
+        '200': {description: Vínculo existente actualizado}
+  /api/v1/employments/{id}:
+    get:
+      summary: Detalle, períodos, cronograma y liquidaciones de un vínculo
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {'200': {description: Detalle del vínculo}, '404': {description: No encontrado}}
+    patch:
+      summary: Editar un vínculo con control de versión
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/EmploymentInput'}}}
+      responses: {'200': {description: Actualizado}, '409': {description: Conflicto de versión}}
+  /api/v1/employments/{id}/retire:
+    post:
+      summary: Registrar fecha de retiro
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [endDate], properties: {endDate: {type: string, format: date}}}}}
+      responses: {'200': {description: Vínculo retirado}}
+  /api/v1/schedules:
+    get:
+      summary: Listar programaciones paginadas
+      parameters:
+        - {$ref: '#/components/parameters/Search'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: employmentId, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [SCHEDULED, CANCELLED, COMPLETED]}}
+        - {name: from, in: query, schema: {type: string, format: date}}
+        - {name: to, in: query, schema: {type: string, format: date}}
+      responses: {'200': {description: Colección paginada y enriquecida con empleado}, '401': {description: Sesión requerida}}
+    post:
+      summary: Crear reserva de vacaciones
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleInput'}}}
+      responses: {'201': {description: Programación creada}, '400': {description: Invariante de saldo inválido}}
+  /api/v1/schedules/{id}:
+    patch:
+      summary: Reprogramar una reserva
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleInput'}}}
+      responses: {'200': {description: Reprogramada}, '409': {description: Conflicto}}
+  /api/v1/schedules/{id}/cancel:
+    post:
+      summary: Cancelar reserva y liberar disponibilidad
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses: {'200': {description: Cancelada}}
+  /api/v1/schedules/{id}/complete:
+    post:
+      summary: Convertir reserva en disfrute real y crear liquidación
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses: {'200': {description: Programación completada}}
+  /api/v1/settlements:
+    get:
+      summary: Listar liquidaciones
+      parameters: [{name: employmentId, in: query, schema: {type: string}}]
+      responses: {'200': {description: Liquidaciones}}
+    post:
+      summary: Registrar vacaciones disfrutadas o compensadas
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses: {'201': {description: Liquidación creada}}
+  /api/v1/settlements/{id}:
+    patch:
+      summary: Editar liquidación con control de versión
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses: {'200': {description: Liquidación actualizada}, '409': {description: Conflicto}}
+  /api/v1/import/preview:
+    post:
+      summary: Validar y previsualizar CSV
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [content], properties: {content: {type: string}}}}}
+      responses: {'200': {description: Filas válidas e inválidas}}
+  /api/v1/import/employments:
+    post:
+      summary: Importación masiva idempotente de empleados
+      parameters:
+        - {name: Idempotency-Key, in: header, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [rows], properties: {rows: {type: array, maxItems: 5000, items: {$ref: '#/components/schemas/EmploymentInput'}}, idempotencyKey: {type: string}}}}}
+      responses:
+        '201': {description: Importación completada}
+        '207': {description: Importación completada con filas inválidas}
+  /api/v1/reports/balances:
+    get:
+      summary: Reporte de saldos
+      parameters:
+        - {name: format, in: query, schema: {type: string, enum: [json, csv, xlsx, pdf], default: json}}
+      responses: {'200': {description: Saldos y totales}}
+  /api/v1/reports/balances.csv:
+    get:
+      summary: Exportación CSV de saldos
+      responses: {'200': {description: Archivo CSV}}
+  /api/v1/reports/upcoming:
+    get:
+      summary: Reporte de próximos a causar
+      parameters: [{name: days, in: query, schema: {type: integer, minimum: 1, maximum: 365, default: 90}}]
+      responses: {'200': {description: Próximos a causar}}
+  /api/v1/reports/schedules/annual:
+    get:
+      summary: Descargar programación anual de vacaciones
+      description: Devuelve un PDF horizontal con empleados programados, fechas, días, períodos de origen, estado, resumen mensual y firmas de control. Por defecto solo incluye programaciones SCHEDULED que se cruzan con el año.
+      parameters:
+        - {name: year, in: query, schema: {type: integer, minimum: 2000, maximum: 2100}}
+        - {name: status, in: query, schema: {type: string, enum: [SCHEDULED, CANCELLED, COMPLETED]}}
+        - {$ref: '#/components/parameters/Search'}
+        - {name: format, in: query, schema: {type: string, enum: [pdf, json], default: pdf}}
+      responses:
+        '200': {description: Archivo PDF o resumen JSON}
+        '400': {description: Año o filtro inválido}
+  /api/v1/audit:
+    get:
+      summary: Consultar auditoría
+      responses: {'200': {description: Eventos de auditoría}}
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: vaca_access
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: string}}
+    Search: {name: search, in: query, schema: {type: string}}
+    Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {name: pageSize, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+    IfMatch: {name: If-Match, in: header, schema: {type: integer, minimum: 1}}
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string, format: password}
+    HolidayInput:
+      type: object
+      required: [date, name]
+      properties:
+        date: {type: string, format: date}
+        name: {type: string}
+        country: {type: string, default: CO}
+        active: {type: boolean, default: true}
+    HolidayPatch:
+      type: object
+      properties:
+        date: {type: string, format: date}
+        name: {type: string}
+        country: {type: string}
+        active: {type: boolean}
+      description: Todos los campos son opcionales en una actualización.
+    EmploymentInput:
+      type: object
+      required: [documentNumber, fullName, startDate, contractTypeName, processName, positionName]
+      properties:
+        documentNumber: {type: string}
+        fullName: {type: string}
+        startDate: {type: string, format: date}
+        endDate: {type: string, format: date}
+        contractTypeName: {type: string}
+        processName: {type: string}
+        positionName: {type: string}
+        supervisorName: {type: string}
+    ScheduleInput:
+      type: object
+      required: [employmentId, startDate, scheduledDays, allocations]
+      properties:
+        employmentId: {type: string}
+        startDate: {type: string, format: date}
+        endDate: {type: string, format: date}
+        scheduledDays: {type: integer, minimum: 1}
+        allocations: {type: array, items: {type: object}}
+    SettlementInput:
+      type: object
+      required: [employmentId, enjoymentStartDate, enjoyedDays, compensatedDays, amountCOP, accountingDocument, allocations]
+      properties:
+        employmentId: {type: string}
+        enjoymentStartDate: {type: string, format: date}
+        enjoymentEndDate: {type: string, format: date}
+        enjoyedDays: {type: integer, minimum: 0}
+        compensatedDays: {type: integer, minimum: 0}
+        amountCOP: {type: number, minimum: 0}
+        accountingDocument: {type: string}
+        allocations: {type: array, items: {type: object}}
