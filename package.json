@@ -1,9 +1,12 @@
 {
   "name": "vaca-efa-backend",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev --workspace @vaca-efa/api",
     "build": "npm run build --workspace @vaca-efa/contracts && npm run build --workspace @vaca-efa/api",

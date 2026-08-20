@@ -46,6 +46,9 @@ export interface VacationSettlementSourceLine {
 export interface VacationSettlement {
   id: string;
   employmentId: string;
+  /** Lightweight employee identity used by paginated views. */
+  employeeName?: string;
+  employeeDocumentNumber?: string;
   sourceScheduleId?: string;
   sourceBatchId?: string;
   sourceKey?: string;
@@ -77,6 +80,8 @@ export type ScheduleStatus = "SCHEDULED" | "CANCELLED" | "COMPLETED";
 export interface VacationSchedule {
   id: string;
   employmentId: string;
+  /** Settlement imported or registered as the source of this historical schedule. */
+  sourceSettlementId?: string;
   startDate: LocalDate;
   endDate: LocalDate;
   scheduledDays: number;
@@ -126,6 +131,58 @@ export interface VacationSettlementImportBatch {
   migrationPeriods: number;
   warnings: string[];
   errors: { row: number; message: string }[];
+  previewToken: string;
+  createdAt: string;
+  authorizedAt?: string;
+  appliedAt?: string;
+}
+export type VacationPeriodClosureDecision =
+  | "CLOSE"
+  | "KEEP"
+  | "PROTECTED"
+  | "FUTURE"
+  | "REVIEW"
+  | "ALREADY_CLOSED";
+export type VacationPeriodClosureBatchStatus =
+  | "PREVIEW"
+  | "AUTHORIZED"
+  | "APPLIED"
+  | "FAILED";
+export interface VacationPeriodClosurePlan {
+  periodId: string;
+  employmentId: string;
+  documentNumber: string;
+  employeeName: string;
+  periodStartDate: LocalDate;
+  periodEndDate: LocalDate;
+  causedAt: LocalDate;
+  lifecycleStatus: PeriodLifecycle;
+  periodVersion: number;
+  pendingDays: number;
+  decision: VacationPeriodClosureDecision;
+  reason: string;
+  settlementIds: string[];
+  accountingDocuments: string[];
+}
+export interface VacationPeriodClosureBatch {
+  id: string;
+  fileName: string;
+  fileHash: string;
+  actorId: string;
+  fromDate: LocalDate;
+  asOf: LocalDate;
+  observation: string;
+  status: VacationPeriodClosureBatchStatus;
+  totalPeriods: number;
+  closedPeriods: number;
+  keptPeriods: number;
+  protectedPeriods: number;
+  futurePeriods: number;
+  reviewPeriods: number;
+  alreadyClosedPeriods: number;
+  warnings: string[];
+  errors: { row?: number; message: string }[];
+  plans: VacationPeriodClosurePlan[];
   previewToken: string;
   createdAt: string;
   authorizedAt?: string;

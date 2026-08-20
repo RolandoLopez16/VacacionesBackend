@@ -235,11 +235,21 @@ Antes de entregar un cambio backend:
 
 ## Rendimiento de consultas
 
+## Administración de usuarios
+
+- El perfil público de usuario incluye `displayName` y `jobTitle`; si una cuenta antigua no tiene estos campos, la API debe devolver valores de respaldo desde el usuario y el rol.
+- `AuthService` normaliza los nombres de usuario, no devuelve hashes ni sales de contraseña y registra las altas, ediciones, activaciones e inactivaciones mediante auditoría en las rutas administrativas.
+- Las cuentas se inactivan mediante `PATCH /api/v1/admin/users/:id` con `{ "active": false }`; no se eliminan. Activarlas usa `{ "active": true }`.
+- Debe existir siempre al menos un administrador activo y un administrador no puede retirar su propio acceso. Mantener estas reglas si se cambia la interfaz o el repositorio.
+- Las ediciones pueden cambiar usuario, rol y contraseña; la contraseña es opcional en una edición y nunca se persiste en texto plano.
+
 - `/api/v1/employments` debe delegar paginación, búsqueda y filtros al puerto `EmploymentRepository.listEmploymentPage` cuando no se requiera un filtro calculado.
+- Cuando el listado solicite `sort=pendingDays` o filtre por `vacationStatus`, `VacationService.listPage` debe calcular los resúmenes por lote, ordenar por `pendingDays` descendente y exponer `PENDING`, `SCHEDULED`, `OVERDUE` o `CLEAR`; no volver a usar la alerta de causación como estado de vacaciones.
 - `VacationService.summariesFor` es la ruta obligatoria para construir una página o dashboard: obtiene trabajadores, períodos, liquidaciones y cronogramas por lote y los agrupa en memoria.
 - No llamar `summary()` dentro de un `for` para una tabla. `summary()` y `detail()` quedan reservados para mutaciones o un vínculo seleccionado.
 - Los métodos `listWorkersByIds`, `findByEmploymentIds`, `findSchedulesByEmploymentIds` y `findSettlementsByEmploymentIds` deben conservarse en MemoryStore y MongoStore.
 - Los endpoints de períodos sin `employmentId` deben paginar vínculos y no ejecutar `ensure` sobre todos los empleados.
+- El dashboard debe calcular salud, cobertura y desglose por proceso desde `summariesFor`; nunca introducir porcentajes fijos en la respuesta.
 - La regularización masiva de retiros debe usar `findByEmploymentIds` una sola vez y `closeRetiredEmploymentsTransaction` en lotes; nunca llamar `findByEmploymentId` dentro de un bucle masivo.
 
 ## Documentación

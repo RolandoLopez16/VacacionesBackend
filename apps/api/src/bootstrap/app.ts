@@ -61,6 +61,12 @@ function listFilters(query: Request["query"]) {
     ...(typeof query.process === "string" && query.process.trim()
       ? { processName: query.process.trim() }
       : {}),
+    ...(query.vacationStatus === "PENDING" ||
+    query.vacationStatus === "SCHEDULED" ||
+    query.vacationStatus === "OVERDUE" ||
+    query.vacationStatus === "CLEAR"
+      ? { vacationStatus: query.vacationStatus }
+      : {}),
     ...(typeof query.alert === "string" && query.alert.trim()
       ? { alert: query.alert.trim() }
       : {}),
@@ -131,10 +137,15 @@ const userInput = z.object({
   username: z.string().trim().min(3),
   password: z.string().min(8),
   role: z.enum(["ADMIN", "HR", "VIEWER", "READ_ONLY"]),
+  displayName: z.string().trim().min(2).optional(),
+  jobTitle: z.string().trim().min(2).optional(),
 });
 const catalogInput = z.object({
   name: z.string().trim().min(2),
   active: z.boolean().optional(),
+});
+const systemSettingInput = z.object({
+  value: z.string().trim().min(2).max(160),
 });
 const holidayInput = z.object({
   date: localDate,
@@ -222,6 +233,21 @@ function importRows(req: Request): {
     fileName: input.fileName,
     fileHash: createHash("sha256").update(rawBuffer).digest("hex"),
     rows,
+  };
+}
+function closureDates(req: Request) {
+  const input = body(
+    z.object({
+      fromDate: z.string().optional(),
+      asOf: z.string().optional(),
+    }),
+    req,
+  );
+  return {
+    fromDate: input.fromDate
+      ? parseLocalDate(input.fromDate)
+      : ("2025-01-01" as LocalDate),
+    asOf: input.asOf ? parseLocalDate(input.asOf) : undefined,
   };
 }
 function cookie(req: Request, name: string) {
@@ -753,6 +779,7 @@ export async function createApp(
       maxDays: Number.isFinite(max) ? max : undefined,
       asOf: queryDate(req.query.asOf),
       filters: listFilters(req.query),
+      sortByPendingDays: req.query.sort === "pendingDays",
     });
     res.json({
       items: result.items,
@@ -1157,6 +1184,54 @@ export async function createApp(
         .json({ code: "NOT_FOUND", message: "Import batch not found" });
     res.json({ data: batch, ...batch });
   });
+  app.post(
+    "/api/v1/admin/vacation-period-closures/preview",
+    async (req, res) => {
+      const input = importRows(req);
+      const dates = closureDates(req);
+      res.json(
+        await service.previewVacationPeriodClosure(
+          input.fileName,
+          input.fileHash,
+          input.rows,
+          actor(req),
+          dates.fromDate,
+          dates.asOf,
+        ),
+      );
+    },
+  );
+  app.post(
+    "/api/v1/admin/vacation-period-closures/:batchId/apply",
+    async (req, res) => {
+      const input = importRows(req);
+      const dates = closureDates(req);
+      const parsed = body(z.object({ previewToken: z.string().min(1) }), req);
+      res.json(
+        await service.applyVacationPeriodClosure(
+          req.params.batchId,
+          input.fileName,
+          input.fileHash,
+          parsed.previewToken,
+          input.rows,
+          actor(req),
+          dates.fromDate,
+          dates.asOf,
+        ),
+      );
+    },
+  );
+  app.get(
+    "/api/v1/admin/vacation-period-closures/:batchId",
+    async (req, res) => {
+      const batch = await store.findVacationPeriodClosureBatch(req.params.batchId);
+      if (!batch)
+        return res
+          .status(404)
+          .json({ code: "NOT_FOUND", message: "Cierre masivo no encontrado" });
+      res.json({ data: batch, ...batch });
+    },
+  );
   app.get("/api/v1/reports/balances", async (req, res) => {
     const items = await service.list(
       typeof req.query.search === "string" ? req.query.search : "",
@@ -1288,25 +1363,48 @@ export async function createApp(
     res.json({ data, items: data });
   });
   app.get("/api/v1/reports/settlements", async (req, res) => {
-    const data = await store.listSettlements();
+    const status =
+      req.query.status === "ACTIVE" || req.query.status === "ANULADA"
+        ? req.query.status
+        : undefined;
+    const data = await service.settlementReport({
+      ...(typeof req.query.search === "string" && req.query.search.trim()
+        ? { search: req.query.search.trim() }
+        : {}),
+      ...(status ? { status } : {}),
+    });
     const rows = [
       [
-        "Vínculo",
-        "Inicio",
-        "Fin",
-        "Disfrutados",
-        "Compensados",
-        "Valor",
-        "Documento",
+        "Empleado",
+        "Cédula",
+        "Proceso",
+        "Cargo",
+        "Supervisor",
+        "Inicio disfrute",
+        "Fin disfrute",
+        "Fecha fin período",
+        "Días tomados",
+        "Días compensados",
+        "Total calendario",
+        "Valor total",
+        "Documento de liquidación",
+        "Estado",
       ],
       ...data.map((item) => [
-        item.employmentId,
+        item.employeeName ?? "Empleado no identificado",
+        item.employeeDocumentNumber ?? item.employmentId,
+        item.processName ?? "",
+        item.positionName ?? "",
+        item.supervisorName ?? "",
         item.enjoymentStartDate,
         item.enjoymentEndDate,
+        item.periodEndDate,
         item.enjoyedDays,
         item.compensatedDays,
+        item.calendarDays,
         item.amountCOP,
         item.accountingDocument,
+        item.status,
       ]),
     ];
     if (sendReport(res, req.query.format, "liquidaciones", rows)) return;
@@ -1335,18 +1433,24 @@ export async function createApp(
       req.query.status === "CANCELLED" ||
       req.query.status === "COMPLETED"
         ? req.query.status
-        : req.query.status === undefined
-          ? "SCHEDULED"
-          : undefined;
+        : undefined;
     const search =
       typeof req.query.search === "string" && req.query.search.trim()
         ? req.query.search.trim()
         : undefined;
-    const report = await service.annualScheduleReport({
+    const baseReport = await service.annualScheduleReport({
       year,
       ...(status ? { status } : {}),
       ...(search ? { search } : {}),
     });
+    const currentUser = await authService.currentUser(actor(req));
+    const gerente = await store.findSystemSettingByKey("GERENTE");
+    const report = {
+      ...baseReport,
+      preparedBy:
+        currentUser?.displayName?.trim() || currentUser?.username || actor(req),
+      approvedBy: gerente?.value?.trim() || "Sin configurar",
+    };
     if (req.query.format === "json") return res.json(report);
     await store.append({
       id: crypto.randomUUID(),
@@ -1360,6 +1464,8 @@ export async function createApp(
         totalEmployees: report.totalEmployees,
         totalSchedules: report.totalSchedules,
         totalDays: report.totalDays,
+        preparedBy: report.preparedBy,
+        approvedBy: report.approvedBy,
       },
       createdAt: new Date().toISOString(),
     });
@@ -1542,6 +1648,41 @@ export async function createApp(
     const result = await service.closeRetiredEmployments(actor(req), queryDate(req.query.asOf));
     res.json({ data: result, ...result });
   });
+  app.get("/api/v1/admin/settings/:key", async (req, res) => {
+    const key = req.params.key.trim().toUpperCase();
+    if (key !== "GERENTE")
+      return res
+        .status(404)
+        .json({ code: "NOT_FOUND", message: "Setting not found" });
+    const setting = await store.findSystemSettingByKey(key);
+    const data = setting ?? { key, value: "" };
+    res.json({ data, ...data });
+  });
+  app.patch("/api/v1/admin/settings/:key", async (req, res) => {
+    const key = req.params.key.trim().toUpperCase();
+    if (key !== "GERENTE")
+      return res
+        .status(404)
+        .json({ code: "NOT_FOUND", message: "Setting not found" });
+    const input = body(systemSettingInput, req);
+    const setting = {
+      key,
+      value: input.value,
+      updatedBy: actor(req),
+      updatedAt: new Date().toISOString(),
+    };
+    await store.saveSystemSetting(setting);
+    await store.append({
+      id: crypto.randomUUID(),
+      actorId: actor(req),
+      action: "SYSTEM_SETTING_UPDATED",
+      entityType: "SystemSetting",
+      entityId: key,
+      metadata: { key, value: input.value },
+      createdAt: setting.updatedAt,
+    });
+    res.json({ data: setting, ...setting });
+  });
   app.get("/api/v1/admin/catalogs/:type", async (req, res) => {
     const type = req.params.type;
     let data = await store.listCatalog(type);
@@ -1623,19 +1764,42 @@ export async function createApp(
       input.username,
       input.password,
       input.role,
+      input.displayName,
+      input.jobTitle,
     );
+    await store.append({
+      id: crypto.randomUUID(),
+      actorId: actor(req),
+      action: "USER_CREATED",
+      entityType: "USER",
+      entityId: user.id,
+      metadata: { username: user.username, displayName: user.displayName, jobTitle: user.jobTitle, role: user.role, active: user.active },
+      createdAt: new Date().toISOString(),
+    });
     res.status(201).json({ data: user, ...user });
   });
   app.patch("/api/v1/admin/users/:id", async (req, res) => {
-    const input = z
-      .object({
+    const input = body(
+      z.object({
         username: z.string().trim().min(3).optional(),
+        displayName: z.string().trim().min(2).optional(),
+        jobTitle: z.string().trim().min(2).optional(),
         password: z.string().min(8).optional(),
         role: z.enum(["ADMIN", "HR", "VIEWER", "READ_ONLY"]).optional(),
         active: z.boolean().optional(),
-      })
-      .parse(req.body);
-    const user = await authService.updateUser(req.params.id, input);
+      }),
+      req,
+    );
+    const user = await authService.updateUser(req.params.id, input, actor(req));
+    await store.append({
+      id: crypto.randomUUID(),
+      actorId: actor(req),
+      action: input.active === undefined ? "USER_UPDATED" : input.active ? "USER_ACTIVATED" : "USER_DEACTIVATED",
+      entityType: "USER",
+      entityId: user.id,
+      metadata: { username: user.username, displayName: user.displayName, jobTitle: user.jobTitle, role: user.role, active: user.active },
+      createdAt: new Date().toISOString(),
+    });
     res.json({ data: user, ...user });
   });
   app.get("/api/v1/admin/audit-events", async (_req, res) => {

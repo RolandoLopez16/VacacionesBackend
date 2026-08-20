@@ -162,7 +162,7 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
       margins: { top: MARGIN, bottom: 34, left: MARGIN, right: MARGIN },
       info: {
         Title: `Programación anual de vacaciones ${report.year}`,
-        Author: "EFAGRAM",
+        Author: report.preparedBy,
         Subject: "Programación anual de vacaciones",
       },
     });
@@ -220,9 +220,22 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
       { width: TABLE_WIDTH },
     );
     y += 34;
-    const signatureWidth = 190;
-    ["Elaboró", "Revisó", "Aprobó"].forEach((label, index) => {
-      const x = MARGIN + index * 245;
+    const signatureWidth = 250;
+    const signatures: [string, string][] = [
+      ["Elaborado por", text(report.preparedBy)],
+      ["Aprobado por", text(report.approvedBy)],
+    ];
+    signatures.forEach(([label, value], index) => {
+      const x = MARGIN + index * 360;
+      document
+        .font("Helvetica-Bold")
+        .fontSize(8)
+        .fillColor(HEADER_FILL)
+        .text(value, x, y - 16, {
+          width: signatureWidth,
+          align: "center",
+          ellipsis: true,
+        });
       document.strokeColor(MUTED).moveTo(x, y).lineTo(x + signatureWidth, y).stroke();
       document.font("Helvetica").fontSize(8).fillColor(MUTED).text(label, x, y + 5, {
         width: signatureWidth,

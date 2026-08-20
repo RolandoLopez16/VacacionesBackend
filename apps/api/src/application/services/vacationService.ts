@@ -29,6 +29,8 @@ import type {
   VacationSettlement,
   VacationSettlementImportBatch,
   VacationSettlementSourceLine,
+  VacationPeriodClosureBatch,
+  VacationPeriodClosurePlan,
 } from "../../domain/vacations/models.js";
 import type { VacationAlert } from "../../domain/vacations/alerts.js";
 import type {
@@ -68,9 +70,18 @@ type ScheduleListItem = VacationSchedule & {
   processName?: string | undefined;
   positionName?: string | undefined;
 };
+type SettlementReportItem = VacationSettlement & {
+  employeeName?: string | undefined;
+  employeeDocumentNumber?: string | undefined;
+  processName?: string | undefined;
+  positionName?: string | undefined;
+  supervisorName?: string | undefined;
+};
 export interface AnnualScheduleReport {
   year: number;
   generatedAt: string;
+  preparedBy: string;
+  approvedBy: string;
   totalEmployees: number;
   totalSchedules: number;
   totalDays: number;
@@ -98,6 +109,7 @@ export interface SettlementInput {
 export interface EmploymentListFilters {
   status?: string | undefined;
   processName?: string | undefined;
+  vacationStatus?: string | undefined;
   alert?: string | undefined;
   fromDate?: LocalDate | undefined;
   toDate?: LocalDate | undefined;
@@ -107,6 +119,23 @@ function failure(message: string, status = 422): Error & { status: number } {
   const error = new Error(message) as Error & { status: number };
   error.status = status;
   return error;
+}
+
+function percentage(value: number, total: number) {
+  return total > 0 ? Math.round((value / total) * 100) : 0;
+}
+
+function percentageBreakdown(values: number[], total: number) {
+  if (total <= 0) return values.map(() => 0);
+  const exact = values.map((value) => (value / total) * 100);
+  const result = exact.map((value) => Math.floor(value));
+  let remaining = 100 - result.reduce((sum, value) => sum + value, 0);
+  const order = exact
+    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
+    .sort((left, right) => right.remainder - left.remainder);
+  for (let index = 0; index < remaining; index++)
+    result[order[index % order.length]!.index]!++;
+  return result;
 }
 
 export class VacationService {
@@ -218,6 +247,20 @@ export class VacationService {
     const sched = caused.map((p) =>
       p.lifecycleStatus === "CLOSED" ? 0 : scheduledByPeriod.get(p.id) ?? 0,
     );
+    const totalPendingDays = pends.reduce((n, p) => n + p, 0);
+    const totalScheduledDays = sched.reduce((n, p) => n + p, 0);
+    const pendingPeriods = pends.filter((days) => days > 0).length;
+    const overduePeriods = caused.filter((p, i) =>
+      overdue(p, pends[i]!, policy, asOf),
+    ).length;
+    const vacationStatus =
+      overduePeriods > 0
+        ? "OVERDUE"
+        : totalPendingDays - totalScheduledDays > 0
+          ? "PENDING"
+          : totalScheduledDays > 0
+            ? "SCHEDULED"
+            : "CLEAR";
     const next =
       employment.status === "RETIRED"
         ? employment.endDate ?? forming.causedAt
@@ -238,23 +281,23 @@ export class VacationService {
       startDate: employment.startDate,
       status: employment.status,
       causedPeriods: caused.length,
+      pendingPeriods,
       generatedDays: caused.reduce((n, p) => n + p.entitledDays, 0),
       enjoyedDays: settlements.reduce((n, s) => n + s.enjoyedDays, 0),
       compensatedDays: settlements.reduce((n, s) => n + s.compensatedDays, 0),
-      pendingDays: pends.reduce((n, p) => n + p, 0),
-      scheduledDays: sched.reduce((n, p) => n + p, 0),
+      pendingDays: totalPendingDays,
+      scheduledDays: totalScheduledDays,
       availableForScheduling: Math.max(
         0,
-        pends.reduce((n, p) => n + p, 0) - sched.reduce((n, p) => n + p, 0),
+        totalPendingDays - totalScheduledDays,
       ),
       nextAccrualDate: next,
       formingStartDate: forming.accrualStartDate,
       formingEndDate: forming.accrualEndDate,
       daysUntilAccrual: days,
       accrualProgressPercent: progress(forming, asOf),
-      overduePeriods: caused.filter((p, i) =>
-        overdue(p, pends[i]!, policy, asOf),
-      ).length,
+      overduePeriods,
+      vacationStatus,
       alert: employment.status === "RETIRED" ? "NORMAL" : alertFor(days),
     };
   }
@@ -347,6 +390,16 @@ export class VacationService {
       policy,
       asOf,
     );
+    const usedByPeriod = new Map<string, number>();
+    for (const settlement of settlements)
+      for (const allocation of settlement.allocations) {
+        const used = allocation.enjoyedDays + allocation.compensatedDays;
+        if (used > 0)
+          usedByPeriod.set(
+            allocation.periodId,
+            (usedByPeriod.get(allocation.periodId) ?? 0) + used,
+          );
+      }
     const periodDtos: VacationPeriodDto[] = periods.map((raw) => {
       const lifecycleStatus: PeriodLifecycle =
         raw.lifecycleStatus === "CLOSED"
@@ -360,6 +413,8 @@ export class VacationService {
           ? 0
           : pendingDays(p, settlements);
       const scheduled = scheduledDays(p, schedules);
+      const displayStatus =
+        (usedByPeriod.get(p.id) ?? 0) > 0 ? "ENJOYED" : p.lifecycleStatus;
       return {
         id: p.id,
         sequence: p.sequence,
@@ -368,6 +423,7 @@ export class VacationService {
         causedAt: p.causedAt,
         entitledDays: p.entitledDays,
         lifecycleStatus: p.lifecycleStatus,
+        displayStatus,
         pendingDays: pending,
         scheduledDays: scheduled,
         availableForScheduling: Math.max(0, pending - scheduled),
@@ -401,6 +457,8 @@ export class VacationService {
           .includes(filters.processName.toLowerCase())
       )
         return false;
+      if (filters.vacationStatus && item.vacationStatus !== filters.vacationStatus)
+        return false;
       if (filters.alert && item.alert !== filters.alert) return false;
       if (filters.fromDate && item.endDate && item.endDate < filters.fromDate)
         return false;
@@ -415,6 +473,7 @@ export class VacationService {
     maxDays?: number | undefined;
     asOf?: LocalDate | undefined;
     filters?: EmploymentListFilters | undefined;
+    sortByPendingDays?: boolean | undefined;
   }) {
     const asOf = query.asOf ?? this.clock();
     const filters = query.filters ?? {};
@@ -429,7 +488,12 @@ export class VacationService {
       ...(filters.fromDate ? { fromDate: filters.fromDate } : {}),
       ...(filters.toDate ? { toDate: filters.toDate } : {}),
     };
-    if (query.maxDays === undefined && !filters.alert) {
+    if (
+      query.maxDays === undefined &&
+      !filters.alert &&
+      !filters.vacationStatus &&
+      !query.sortByPendingDays
+    ) {
       const page = await this.store.listEmploymentPage(repoQuery);
       return {
         items: await this.summariesFor(page.items, asOf),
@@ -442,10 +506,19 @@ export class VacationService {
       asOf,
       filters,
     );
+    const ordered = query.sortByPendingDays
+      ? all.sort(
+          (left, right) =>
+            right.pendingDays - left.pendingDays ||
+            right.availableForScheduling - left.availableForScheduling ||
+            left.fullName.localeCompare(right.fullName, "es") ||
+            right.startDate.localeCompare(left.startDate),
+        )
+      : all;
     const start = (query.page - 1) * query.pageSize;
     return {
-      items: all.slice(start, start + query.pageSize),
-      total: all.length,
+      items: ordered.slice(start, start + query.pageSize),
+      total: ordered.length,
     };
   }
   async dashboard(
@@ -461,27 +534,112 @@ export class VacationService {
       ...(filters.toDate ? { toDate: filters.toDate } : {}),
     });
     const items = await this.summariesFor(employments, asOf);
-    const upcoming = items
+    const activeItems = items.filter((item) => item.status === "ACTIVE");
+    const healthCounts = {
+      upToDate: 0,
+      programmed: 0,
+      partial: 0,
+      pending: 0,
+      overdue: 0,
+    };
+    for (const item of activeItems) {
+      if (item.overduePeriods > 0) healthCounts.overdue++;
+      else if (item.availableForScheduling === 0 && item.scheduledDays > 0)
+        healthCounts.programmed++;
+      else if (item.availableForScheduling > 0 && item.scheduledDays > 0)
+        healthCounts.partial++;
+      else if (item.availableForScheduling > 0) healthCounts.pending++;
+      else healthCounts.upToDate++;
+    }
+    const healthTotal = activeItems.length;
+    const healthPercentages = percentageBreakdown([
+      healthCounts.upToDate,
+      healthCounts.programmed,
+      healthCounts.partial,
+      healthCounts.pending,
+      healthCounts.overdue,
+    ], healthTotal);
+    const health = {
+      total: healthTotal,
+      ...healthCounts,
+      upToDatePercent: healthPercentages[0]!,
+      programmedPercent: healthPercentages[1]!,
+      partialPercent: healthPercentages[2]!,
+      pendingPercent: healthPercentages[3]!,
+      overduePercent: healthPercentages[4]!,
+    };
+    const processMap = new Map<string, {
+      processName: string;
+      activeEmployees: number;
+      pendingEmployees: number;
+      scheduledEmployees: number;
+      overdueEmployees: number;
+      pendingDays: number;
+      availableDays: number;
+      scheduledDays: number;
+    }>();
+    for (const item of activeItems) {
+      const current = processMap.get(item.processName) ?? {
+        processName: item.processName,
+        activeEmployees: 0,
+        pendingEmployees: 0,
+        scheduledEmployees: 0,
+        overdueEmployees: 0,
+        pendingDays: 0,
+        availableDays: 0,
+        scheduledDays: 0,
+      };
+      current.activeEmployees++;
+      if (item.availableForScheduling > 0) current.pendingEmployees++;
+      if (item.scheduledDays > 0) current.scheduledEmployees++;
+      if (item.overduePeriods > 0) current.overdueEmployees++;
+      current.pendingDays += item.pendingDays;
+      current.availableDays += item.availableForScheduling;
+      current.scheduledDays += item.scheduledDays;
+      processMap.set(item.processName, current);
+    }
+    const processBreakdown = [...processMap.values()]
+      .map((process) => ({
+        ...process,
+        coveragePercent: process.pendingDays
+          ? percentage(process.scheduledDays, process.pendingDays)
+          : 100,
+      }))
+      .sort(
+        (left, right) =>
+          right.overdueEmployees - left.overdueEmployees ||
+          right.availableDays - left.availableDays ||
+          left.processName.localeCompare(right.processName, "es"),
+      );
+    const upcoming = activeItems
       .filter((i) => i.daysUntilAccrual <= 90 && i.status === "ACTIVE")
       .sort((a, b) => a.daysUntilAccrual - b.daysUntilAccrual)
       .slice(0, 25);
+    const pendingDays = activeItems.reduce((n, item) => n + item.pendingDays, 0);
+    const scheduledDays = activeItems.reduce((n, item) => n + item.scheduledDays, 0);
     return {
       asOf,
       totalEmployees: items.length,
-      activeEmployees: items.filter((i) => i.status === "ACTIVE").length,
-      pendingPeriods: items
-        .filter((i) => i.pendingDays > 0)
-        .reduce((n, i) => n + i.causedPeriods, 0),
-      pendingDays: items.reduce((n, i) => n + i.pendingDays, 0),
-      upcoming90Days: items.filter(
+      activeEmployees: activeItems.length,
+      pendingPeriods: activeItems.reduce((n, item) => n + item.pendingPeriods, 0),
+      pendingDays,
+      scheduledDays,
+      availableDays: activeItems.reduce((n, item) => n + item.availableForScheduling, 0),
+      enjoyedDays: activeItems.reduce((n, item) => n + item.enjoyedDays, 0),
+      compensatedDays: activeItems.reduce((n, item) => n + item.compensatedDays, 0),
+      pendingEmployees: healthCounts.pending + healthCounts.partial + healthCounts.overdue,
+      scheduledEmployees: activeItems.filter((item) => item.scheduledDays > 0).length,
+      overdueEmployees: healthCounts.overdue,
+      scheduleCoveragePercent: pendingDays ? percentage(scheduledDays, pendingDays) : 100,
+      upcoming90Days: activeItems.filter(
         (i) => i.daysUntilAccrual <= 90 && i.status === "ACTIVE",
       ).length,
-      priorityCases: items.filter(
+      priorityCases: activeItems.filter(
         (i) =>
-          i.status === "ACTIVE" &&
-          i.pendingDays > 0 &&
-          i.daysUntilAccrual <= 30,
+          i.availableForScheduling > 0 && i.daysUntilAccrual <= 30,
       ).length,
+      health,
+      processBreakdown,
       upcoming,
     };
   }
@@ -850,6 +1008,357 @@ export class VacationService {
     };
   }
 
+  private async buildVacationPeriodClosurePlan(
+    rows: SettlementRawRow[],
+    fromDate: LocalDate,
+    asOf: LocalDate,
+  ) {
+    if (fromDate > asOf)
+      throw failure("La fecha inicial no puede ser posterior a la fecha de corte");
+    const normalized = normalizeSettlementRows(rows);
+    const groups = groupSettlementLines(normalized.lines);
+    const employments = await this.store.listEmployments();
+    const workers = await this.store.listWorkers();
+    const workersByDocument = new Map(
+      workers.map((worker) => [worker.normalizedDocumentNumber, worker]),
+    );
+    const employmentsByWorker = new Map<string, Employment[]>();
+    for (const employment of employments)
+      (
+        employmentsByWorker.get(employment.workerId) ??
+        employmentsByWorker
+          .set(employment.workerId, [])
+          .get(employment.workerId)!
+      ).push(employment);
+    const periods = await this.store.findByEmploymentIds(
+      employments.map((employment) => employment.id),
+    );
+    const settlements = await this.store.findSettlementsByEmploymentIds(
+      employments.map((employment) => employment.id),
+    );
+    const schedules = await this.store.findSchedulesByEmploymentIds(
+      employments.map((employment) => employment.id),
+    );
+    const periodsByEmployment = new Map<string, VacationPeriod[]>();
+    for (const period of periods)
+      (
+        periodsByEmployment.get(period.employmentId) ??
+        periodsByEmployment
+          .set(period.employmentId, [])
+          .get(period.employmentId)!
+      ).push(period);
+    const settlementsByEmployment = new Map<string, VacationSettlement[]>();
+    const settlementsByPeriod = new Map<string, VacationSettlement[]>();
+    for (const settlement of settlements) {
+      (
+        settlementsByEmployment.get(settlement.employmentId) ??
+        settlementsByEmployment
+          .set(settlement.employmentId, [])
+          .get(settlement.employmentId)!
+      ).push(settlement);
+      for (const allocation of settlement.allocations)
+        (
+          settlementsByPeriod.get(allocation.periodId) ??
+          settlementsByPeriod
+            .set(allocation.periodId, [])
+            .get(allocation.periodId)!
+        ).push(settlement);
+    }
+    const scheduledPeriodIds = new Set<string>();
+    for (const schedule of schedules)
+      if (schedule.status === "SCHEDULED")
+        for (const allocation of schedule.allocations)
+          if (allocation.periodId) scheduledPeriodIds.add(allocation.periodId);
+
+    const protectedEmploymentIds = new Set<string>();
+    const protectedPeriodIds = new Set<string>();
+    const protectionReasons = new Map<string, string>();
+    const matchingErrors: { row?: number; message: string }[] = [];
+    const yearEnd = `${fromDate.slice(0, 4)}-12-31` as LocalDate;
+    for (const line of normalized.lines) {
+      const worker = workersByDocument.get(line.normalizedDocument);
+      if (!worker) {
+        matchingErrors.push({
+          row: line.lineNumber,
+          message: `No existe un empleado con la cédula ${line.employee}`,
+        });
+        continue;
+      }
+      const matches = (employmentsByWorker.get(worker.id) ?? []).filter(
+        (employment) =>
+          employment.startDate <= line.periodFinishDate &&
+          (!employment.endDate || employment.endDate >= line.periodStartDate),
+      );
+      const exact = matches.filter(
+        (employment) => employment.startDate === line.startDate,
+      );
+      const employment =
+        exact.length === 1
+          ? exact[0]
+          : matches.length === 1
+            ? matches[0]
+            : undefined;
+      if (!employment) {
+        matchingErrors.push({
+          row: line.lineNumber,
+          message: matches.length
+            ? `Hay varios contratos compatibles para ${line.employee}`
+            : `No existe un contrato compatible para ${line.employee}`,
+        });
+        continue;
+      }
+      const affected = (periodsByEmployment.get(employment.id) ?? []).filter(
+        (period) =>
+          period.accrualStartDate <= line.periodFinishDate &&
+          period.accrualEndDate >= line.periodStartDate,
+      );
+      if (!affected.length) {
+        matchingErrors.push({
+          row: line.lineNumber,
+          message: `La línea ${line.lineNumber} no coincide con ningún período de ${line.employee}`,
+        });
+        continue;
+      }
+      const isHistoricalEnjoyment =
+        line.enjoymentStartDate <= yearEnd &&
+        line.enjoymentEndDate >= fromDate &&
+        line.periodStartDate < fromDate;
+      if (isHistoricalEnjoyment) {
+        protectedEmploymentIds.add(employment.id);
+        protectionReasons.set(
+          employment.id,
+          "Disfrute registrado en el año de inicio sobre un período iniciado antes de la fecha de corte",
+        );
+      }
+      for (const period of affected) protectedPeriodIds.add(period.id);
+    }
+
+    const employmentById = new Map(
+      employments.map((employment) => [employment.id, employment]),
+    );
+    const workerById = new Map(workers.map((worker) => [worker.id, worker]));
+    const plans: VacationPeriodClosurePlan[] = periods
+      .map((period) => {
+        const employment = employmentById.get(period.employmentId);
+        const worker = employment ? workerById.get(employment.workerId) : undefined;
+        const relatedSettlements = settlementsByPeriod.get(period.id) ?? [];
+        const pending = pendingDays(period, relatedSettlements);
+        const hasScheduled = scheduledPeriodIds.has(period.id);
+        let decision: VacationPeriodClosurePlan["decision"] = "REVIEW";
+        let reason = "No fue posible identificar el contrato del período";
+        const oldProtected =
+          period.causedAt < fromDate &&
+          (protectedPeriodIds.has(period.id) ||
+            (employment ? protectedEmploymentIds.has(employment.id) : false));
+        if (!employment || !worker) {
+          decision = "REVIEW";
+        } else if (oldProtected) {
+          decision = "PROTECTED";
+          reason =
+            protectionReasons.get(employment.id) ??
+            (period.lifecycleStatus === "CLOSED"
+              ? "Período histórico relacionado con el archivo y ya cerrado; no se modifica"
+              : "Período histórico relacionado con una liquidación del archivo de disfrutes");
+        } else if (period.lifecycleStatus === "CLOSED") {
+          decision = "ALREADY_CLOSED";
+          reason = "El período ya estaba cerrado y no se modifica";
+        } else if (period.causedAt > asOf) {
+          decision = "FUTURE";
+          reason = "El período todavía no está causado a la fecha de corte";
+        } else if (period.causedAt >= fromDate) {
+          decision = "KEEP";
+          reason = "Período causado dentro del rango autorizado";
+        } else if (pending <= 0) {
+          decision = "KEEP";
+          reason = "No tiene saldo pendiente para cerrar";
+        } else if (hasScheduled) {
+          decision = "REVIEW";
+          reason = "Tiene un cronograma activo y requiere revisión";
+        } else if (relatedSettlements.length) {
+          decision = "REVIEW";
+          reason = "Tiene una liquidación activa y saldo pendiente";
+        } else {
+          decision = "CLOSE";
+          reason = "Período causado antes del rango y con saldo pendiente";
+        }
+        return {
+          periodId: period.id,
+          employmentId: period.employmentId,
+          documentNumber: worker?.documentNumber ?? "—",
+          employeeName: worker?.fullName ?? "Contrato no identificado",
+          periodStartDate: period.accrualStartDate,
+          periodEndDate: period.accrualEndDate,
+          causedAt: period.causedAt,
+          lifecycleStatus: period.lifecycleStatus,
+          periodVersion: period.version,
+          pendingDays: pending,
+          decision,
+          reason,
+          settlementIds: relatedSettlements.map((settlement) => settlement.id),
+          accountingDocuments: relatedSettlements.map(
+            (settlement) => settlement.accountingDocument,
+          ),
+        };
+      })
+      .sort(
+        (left, right) =>
+          left.employeeName.localeCompare(right.employeeName, "es") ||
+          left.periodStartDate.localeCompare(right.periodStartDate),
+      );
+    return {
+      plans,
+      warnings: groups.flatMap((group) => group.warnings),
+      errors: [...normalized.errors, ...matchingErrors],
+    };
+  }
+
+  async previewVacationPeriodClosure(
+    fileName: string,
+    fileHash: string,
+    rows: SettlementRawRow[],
+    actor = "system",
+    fromDate: LocalDate = "2025-01-01",
+    asOf: LocalDate = this.clock(),
+  ) {
+    const existing = await this.store.findVacationPeriodClosureByFileHash(
+      fileHash,
+    );
+    if (existing?.status === "APPLIED")
+      return {
+        alreadyProcessed: existing.status === "APPLIED",
+        batch: existing,
+        plans: existing.plans,
+      };
+    const built = await this.buildVacationPeriodClosurePlan(rows, fromDate, asOf);
+    const counts = (decision: VacationPeriodClosurePlan["decision"]) =>
+      built.plans.filter((plan) => plan.decision === decision).length;
+    const batch: VacationPeriodClosureBatch = {
+      id: existing?.id ?? crypto.randomUUID(),
+      fileName,
+      fileHash,
+      actorId: actor,
+      fromDate,
+      asOf,
+      observation: "Liquidación en sistema contable",
+      status: "PREVIEW",
+      totalPeriods: built.plans.length,
+      closedPeriods: counts("CLOSE"),
+      keptPeriods: counts("KEEP"),
+      protectedPeriods: counts("PROTECTED"),
+      futurePeriods: counts("FUTURE"),
+      reviewPeriods: counts("REVIEW"),
+      alreadyClosedPeriods: counts("ALREADY_CLOSED"),
+      warnings: built.warnings,
+      errors: built.errors,
+      plans: built.plans,
+      previewToken: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    await this.store.saveVacationPeriodClosureBatch(batch);
+    return { alreadyProcessed: false, batch, plans: batch.plans };
+  }
+
+  async applyVacationPeriodClosure(
+    batchId: string,
+    fileName: string,
+    fileHash: string,
+    previewToken: string,
+    rows: SettlementRawRow[],
+    actor = "system",
+    fromDate: LocalDate = "2025-01-01",
+    asOf: LocalDate = this.clock(),
+  ) {
+    const batch = await this.store.findVacationPeriodClosureBatch(batchId);
+    if (!batch) throw failure("No existe la vista previa del cierre masivo", 404);
+    if (
+      batch.fileName !== fileName ||
+      batch.fileHash !== fileHash ||
+      batch.previewToken !== previewToken ||
+      batch.fromDate !== fromDate ||
+      batch.asOf !== asOf
+    )
+      throw failure("La vista previa está vencida o no coincide con el archivo", 409);
+    if (batch.errors.length || batch.reviewPeriods > 0)
+      throw failure(
+        "El cierre masivo tiene errores o períodos en revisión; resuélvelos antes de aplicar",
+        409,
+      );
+    const current = await this.buildVacationPeriodClosurePlan(rows, fromDate, asOf);
+    if (current.errors.length || current.plans.some((plan) => plan.decision === "REVIEW"))
+      throw failure("Los datos cambiaron desde la vista previa; genera una nueva vista previa", 409);
+    const currentById = new Map(current.plans.map((plan) => [plan.periodId, plan]));
+    const storedPeriods = await this.store.findByEmploymentIds(
+      [...new Set(batch.plans.map((plan) => plan.employmentId))],
+    );
+    const periodsById = new Map(storedPeriods.map((period) => [period.id, period]));
+    const toClose: VacationPeriod[] = [];
+    for (const plan of batch.plans.filter((item) => item.decision === "CLOSE")) {
+      const period = periodsById.get(plan.periodId);
+      const fresh = currentById.get(plan.periodId);
+      if (
+        !period ||
+        !fresh ||
+        period.version !== plan.periodVersion ||
+        fresh.decision !== "CLOSE"
+      )
+        throw failure("Los períodos cambiaron desde la vista previa; genera una nueva vista previa", 409);
+      toClose.push({
+        ...period,
+        lifecycleStatus: "CLOSED",
+        closureObservation: batch.observation,
+        version: period.version + 1,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const appliedAt = new Date().toISOString();
+    const appliedBatch: VacationPeriodClosureBatch = {
+      ...batch,
+      actorId: actor,
+      status: "APPLIED",
+      authorizedAt: batch.authorizedAt ?? appliedAt,
+      appliedAt,
+      closedPeriods: toClose.length,
+    };
+    const audits = [
+      ...toClose.map((period) => ({
+        id: crypto.randomUUID(),
+        actorId: actor,
+        action: "VACATION_PERIOD_CLOSED_MASSIVELY",
+        entityType: "VacationPeriod",
+        entityId: period.id,
+        metadata: {
+          batchId,
+          employmentId: period.employmentId,
+          observation: batch.observation,
+          fromDate,
+          asOf,
+        },
+        createdAt: appliedAt,
+      })),
+      {
+        id: crypto.randomUUID(),
+        actorId: actor,
+        action: "VACATION_PERIOD_CLOSURE_BATCH_APPLIED",
+        entityType: "VacationPeriodClosureBatch",
+        entityId: batch.id,
+        metadata: {
+          totalPeriods: batch.totalPeriods,
+          closedPeriods: toClose.length,
+          protectedPeriods: batch.protectedPeriods,
+          reviewPeriods: batch.reviewPeriods,
+          observation: batch.observation,
+        },
+        createdAt: appliedAt,
+      },
+    ];
+    await this.store.applyVacationPeriodClosure(appliedBatch, toClose, audits);
+    return {
+      replayed: false,
+      batch: appliedBatch,
+      closedPeriods: toClose.length,
+    };
+  }
+
   private async scheduleValidation(
     input: ScheduleInput,
     ignoreScheduleId?: string,
@@ -1127,6 +1636,8 @@ export class VacationService {
     return {
       year: query.year,
       generatedAt: new Date().toISOString(),
+      preparedBy: "Sistema",
+      approvedBy: "Sin configurar",
       totalEmployees: new Set(
         items.map((item) => item.employeeDocumentNumber),
       ).size,
@@ -1267,6 +1778,77 @@ export class VacationService {
     toDate?: LocalDate | undefined;
   }) {
     return this.store.listSettlementPage(query);
+  }
+  async settlementReport(query: {
+    search?: string | undefined;
+    status?: VacationSettlement["status"] | undefined;
+  }): Promise<SettlementReportItem[]> {
+    const settlements = await this.store.listSettlements(
+      query.status === undefined || query.status === "ANULADA",
+    );
+    const employments = await this.store.findEmploymentsByIds(
+      [...new Set(settlements.map((item) => item.employmentId))],
+    );
+    const workers = await this.store.listWorkersByIds(
+      employments.map((item) => item.workerId),
+    );
+    const employmentsById = new Map(
+      employments.map((employment) => [employment.id, employment]),
+    );
+    const workersById = new Map(workers.map((worker) => [worker.id, worker]));
+    const search = query.search?.trim().toLowerCase();
+    return settlements
+      .filter((settlement) => {
+        if (query.status && settlement.status !== query.status) return false;
+        if (!search) return true;
+        const employment = employmentsById.get(settlement.employmentId);
+        const worker = employment
+          ? workersById.get(employment.workerId)
+          : undefined;
+        const haystack = [
+          settlement.employmentId,
+          settlement.accountingDocument,
+          settlement.sourceKey,
+          worker?.documentNumber,
+          worker?.fullName,
+          employment?.processName,
+          employment?.positionName,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(search);
+      })
+      .map((settlement) => {
+        const employment = employmentsById.get(settlement.employmentId);
+        const worker = employment
+          ? workersById.get(employment.workerId)
+          : undefined;
+        return {
+          ...settlement,
+          ...(worker?.fullName ? { employeeName: worker.fullName } : {}),
+          ...(worker?.documentNumber
+            ? { employeeDocumentNumber: worker.documentNumber }
+            : {}),
+          ...(employment?.processName
+            ? { processName: employment.processName }
+            : {}),
+          ...(employment?.positionName
+            ? { positionName: employment.positionName }
+            : {}),
+          ...(employment?.supervisorName
+            ? { supervisorName: employment.supervisorName }
+            : {}),
+        };
+      })
+      .sort(
+        (left, right) =>
+          left.periodEndDate.localeCompare(right.periodEndDate) * -1 ||
+          (left.employeeName ?? "").localeCompare(
+            right.employeeName ?? "",
+            "es",
+          ),
+      );
   }
   async updateSettlement(
     id: string,
@@ -1742,7 +2324,7 @@ export class VacationService {
         "The import preview is stale or does not match the selected file",
         409,
       );
-    if (batch.status === "APPLIED") return { replayed: true, batch };
+    const replayed = batch.status === "APPLIED";
     const normalized = normalizeSettlementRows(rows);
     const plans = await this.importGroups(
       groupSettlementLines(normalized.lines),
@@ -1783,6 +2365,93 @@ export class VacationService {
       appliedAt: new Date().toISOString(),
       actorId: actor,
     };
+    const importedScheduleIds = plans.flatMap((plan) =>
+      plan.settlement ? [`imported-settlement:${plan.settlement.id}`] : [],
+    );
+    const existingSchedules = new Map(
+      (await this.store.findSchedulesByIds(importedScheduleIds)).map((schedule) => [
+        schedule.id,
+        schedule,
+      ]),
+    );
+    const schedules: VacationSchedule[] = [];
+    const scheduleAudits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[] = [];
+    for (const plan of plans) {
+      const settlement = plan.settlement;
+      const scheduledDays = settlement
+        ? settlement.enjoyedDays + settlement.compensatedDays
+        : 0;
+      if (!settlement || scheduledDays <= 0) continue;
+      const allocations = settlement.allocations
+        .map((allocation) => {
+          const period = plan.periods.find(
+            (item) => item.id === allocation.periodId,
+          );
+          if (!period)
+            throw failure(
+              `No se encontró el período ${allocation.periodId} para crear la programación importada`,
+            );
+          return {
+            periodId: allocation.periodId,
+            periodType: "CAUSED" as const,
+            periodStartDate: period.accrualStartDate,
+            periodEndDate: period.accrualEndDate,
+            days: allocation.enjoyedDays + allocation.compensatedDays,
+          };
+        })
+        .filter((allocation) => allocation.days > 0);
+      if (!allocations.length) continue;
+      const scheduleId = `imported-settlement:${settlement.id}`;
+      const existing = existingSchedules.get(scheduleId);
+      const schedule: VacationSchedule = {
+        id: scheduleId,
+        employmentId: settlement.employmentId,
+        sourceSettlementId: settlement.id,
+        startDate: settlement.enjoymentStartDate,
+        endDate: settlement.enjoymentEndDate,
+        scheduledDays,
+        allocations,
+        status: "COMPLETED",
+        version: (existing?.version ?? 0) + 1,
+        createdAt: existing?.createdAt ?? appliedBatch.appliedAt!,
+        updatedAt: appliedBatch.appliedAt!,
+      };
+      const unchanged =
+        existing &&
+        existing.employmentId === schedule.employmentId &&
+        existing.sourceSettlementId === schedule.sourceSettlementId &&
+        existing.startDate === schedule.startDate &&
+        existing.endDate === schedule.endDate &&
+        existing.scheduledDays === schedule.scheduledDays &&
+        existing.status === schedule.status &&
+        JSON.stringify(existing.allocations) === JSON.stringify(schedule.allocations);
+      if (unchanged) continue;
+      schedules.push(schedule);
+      scheduleAudits.push({
+        id: crypto.randomUUID(),
+        actorId: actor,
+        action: existing
+          ? "VACATION_SCHEDULE_IMPORTED_UPDATED"
+          : "VACATION_SCHEDULE_IMPORTED",
+        entityType: "VacationSchedule",
+        entityId: schedule.id,
+        metadata: {
+          settlementId: settlement.id,
+          sourceKey: settlement.sourceKey,
+          status: schedule.status,
+          scheduledDays: schedule.scheduledDays,
+        },
+        createdAt: schedule.updatedAt,
+      });
+    }
     const audits: {
       id: string;
       actorId: string;
@@ -1809,6 +2478,7 @@ export class VacationService {
       },
       createdAt: appliedBatch.appliedAt!,
     }));
+    audits.push(...scheduleAudits);
     audits.push({
       id: crypto.randomUUID(),
       actorId: actor,
@@ -1820,6 +2490,7 @@ export class VacationService {
         newSettlements: batch.newSettlements,
         modifiedSettlements: batch.modifiedSettlements,
         closedPeriods: periods.length,
+        importedSchedules: schedules.length,
       },
       createdAt: appliedBatch.appliedAt!,
     });
@@ -1828,13 +2499,16 @@ export class VacationService {
       settlements,
       periods,
       audits,
+      schedules,
     );
     return {
-      replayed: false,
+      replayed,
       batch: appliedBatch,
       created: settlements.filter((item) => item.version === 1).length,
       updated: settlements.filter((item) => item.version > 1).length,
       closedPeriods: periods.length,
+      createdSchedules: schedules.filter((item) => item.version === 1).length,
+      updatedSchedules: schedules.filter((item) => item.version > 1).length,
     };
   }
   async completeSchedule(
