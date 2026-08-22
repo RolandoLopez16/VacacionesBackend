@@ -6,11 +6,14 @@ import type {
   VacationSchedule,
   VacationSettlement,
   VacationSettlementImportBatch,
+  VacationPeriodClosureBatch,
+  VacationPendingPeriodImportBatch,
 } from "../../domain/vacations/models.js";
 import type { LocalDate } from "../../domain/shared/localDate.js";
 import type { User } from "../../domain/auth/models.js";
 import type { Session } from "../../domain/auth/session.js";
 import type { CatalogItem } from "../../domain/admin/catalog.js";
+import type { SystemSetting } from "../../domain/admin/settings.js";
 import type { Holiday } from "../../domain/admin/holiday.js";
 import type { VacationAlert } from "../../domain/vacations/alerts.js";
 import type { SchedulerRun } from "../../domain/vacations/schedulerRun.js";
@@ -63,6 +66,7 @@ export interface ScheduleRepository {
     query: AnnualScheduleReportQuery,
   ): Promise<ScheduleReportItem[]>;
   findSchedulesByEmploymentIds(ids: string[]): Promise<VacationSchedule[]>;
+  findSchedulesByIds(ids: string[]): Promise<VacationSchedule[]>;
   findScheduleById(id: string): Promise<VacationSchedule | null>;
   saveSchedule(schedule: VacationSchedule): Promise<void>;
 }
@@ -105,7 +109,7 @@ export interface SettlementPage {
   total: number;
 }
 export interface SettlementRepository {
-  listSettlements(): Promise<VacationSettlement[]>;
+  listSettlements(includeAnnulled?: boolean): Promise<VacationSettlement[]>;
   listSettlementPage(query: SettlementPageQuery): Promise<SettlementPage>;
   findSettlementsByEmploymentIds(ids: string[]): Promise<VacationSettlement[]>;
   findSettlementById(id: string): Promise<VacationSettlement | null>;
@@ -145,6 +149,22 @@ export interface VacationSettlementImportRepository {
     batch: VacationSettlementImportBatch,
   ): Promise<void>;
 }
+export interface VacationPeriodClosureRepository {
+  findVacationPeriodClosureBatch(id: string): Promise<VacationPeriodClosureBatch | null>;
+  findVacationPeriodClosureByFileHash(fileHash: string): Promise<VacationPeriodClosureBatch | null>;
+  saveVacationPeriodClosureBatch(batch: VacationPeriodClosureBatch): Promise<void>;
+}
+export interface VacationPendingPeriodImportRepository {
+  findVacationPendingPeriodImportBatch(
+    id: string,
+  ): Promise<VacationPendingPeriodImportBatch | null>;
+  findVacationPendingPeriodImportByFileHash(
+    fileHash: string,
+  ): Promise<VacationPendingPeriodImportBatch | null>;
+  saveVacationPendingPeriodImportBatch(
+    batch: VacationPendingPeriodImportBatch,
+  ): Promise<void>;
+}
 export interface SessionRepository {
   findSessionById(id: string): Promise<Session | null>;
   saveSession(session: Session): Promise<void>;
@@ -153,6 +173,10 @@ export interface SessionRepository {
 export interface CatalogRepository {
   listCatalog(type: string): Promise<CatalogItem[]>;
   saveCatalog(item: CatalogItem): Promise<void>;
+}
+export interface SystemSettingRepository {
+  findSystemSettingByKey(key: string): Promise<SystemSetting | null>;
+  saveSystemSetting(setting: SystemSetting): Promise<void>;
 }
 export interface HolidayRepository {
   listHolidays(year?: number): Promise<Holiday[]>;
@@ -235,6 +259,33 @@ export interface TransactionRepository {
       metadata: unknown;
       createdAt: string;
     }[],
+    schedules?: VacationSchedule[],
+  ): Promise<void>;
+  applyVacationPeriodClosure(
+    batch: VacationPeriodClosureBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+  ): Promise<void>;
+  applyVacationPendingPeriodImport(
+    batch: VacationPendingPeriodImportBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
   ): Promise<void>;
   saveSettlementAndAudit(
     settlement: VacationSettlement,
@@ -265,8 +316,11 @@ export interface VacationStore
     AuditRepository,
     ImportBatchRepository,
     VacationSettlementImportRepository,
+    VacationPeriodClosureRepository,
+    VacationPendingPeriodImportRepository,
     SessionRepository,
     CatalogRepository,
+    SystemSettingRepository,
     HolidayRepository,
     AlertRepository,
     SchedulerRunRepository,

@@ -15,10 +15,13 @@ import type {
   VacationSchedule,
   VacationSettlement,
   VacationSettlementImportBatch,
+  VacationPeriodClosureBatch,
+  VacationPendingPeriodImportBatch,
 } from "../../../domain/vacations/models.js";
 import type { User } from "../../../domain/auth/models.js";
 import type { Session } from "../../../domain/auth/session.js";
 import type { CatalogItem } from "../../../domain/admin/catalog.js";
+import type { SystemSetting } from "../../../domain/admin/settings.js";
 import type { Holiday } from "../../../domain/admin/holiday.js";
 import type { VacationAlert } from "../../../domain/vacations/alerts.js";
 import type { SchedulerRun } from "../../../domain/vacations/schedulerRun.js";
@@ -103,6 +106,18 @@ export class MongoStore implements VacationStore {
       this.collection<VacationSettlementImportBatch>(
         "vacationSettlementImportBatches",
       ).createIndex({ fileHash: 1 }),
+      this.collection<VacationPeriodClosureBatch>(
+        "vacationPeriodClosureBatches",
+      ).createIndex({ id: 1 }, { unique: true }),
+      this.collection<VacationPeriodClosureBatch>(
+        "vacationPeriodClosureBatches",
+      ).createIndex({ fileHash: 1 }),
+      this.collection<VacationPendingPeriodImportBatch>(
+        "vacationPendingPeriodImportBatches",
+      ).createIndex({ id: 1 }, { unique: true }),
+      this.collection<VacationPendingPeriodImportBatch>(
+        "vacationPendingPeriodImportBatches",
+      ).createIndex({ fileHash: 1 }),
       this.collection<Session>("sessions").createIndex(
         { id: 1 },
         { unique: true },
@@ -110,6 +125,10 @@ export class MongoStore implements VacationStore {
       this.collection<Session>("sessions").createIndex({ expiresAt: 1 }),
       this.collection<CatalogItem>("catalogItems").createIndex(
         { type: 1, name: 1 },
+        { unique: true },
+      ),
+      this.collection<SystemSetting>("systemSettings").createIndex(
+        { key: 1 },
         { unique: true },
       ),
       this.collection<Holiday>("holidays").createIndex(
@@ -508,6 +527,14 @@ export class MongoStore implements VacationStore {
         .toArray()
     ).map(strip);
   }
+  async findSchedulesByIds(ids: string[]) {
+    if (!ids.length) return [];
+    return (
+      await this.collection<VacationSchedule>("vacationSchedules")
+        .find({ id: { $in: ids } })
+        .toArray()
+    ).map(strip);
+  }
   async findScheduleById(id: string) {
     const doc = await this.collection<VacationSchedule>(
       "vacationSchedules",
@@ -521,11 +548,11 @@ export class MongoStore implements VacationStore {
       { upsert: true },
     );
   }
-  async listSettlements() {
+  async listSettlements(includeAnnulled = false) {
     return (
       await this.collection<VacationSettlement>("vacationSettlements")
         .find(
-          { status: { $ne: "ANULADA" } },
+          includeAnnulled ? {} : { status: { $ne: "ANULADA" } },
           { projection: { sourceLines: 0 } },
         )
         .sort({ periodEndDate: -1 })
@@ -542,27 +569,103 @@ export class MongoStore implements VacationStore {
         ...(query.fromDate ? { $gte: query.fromDate } : {}),
         ...(query.toDate ? { $lte: query.toDate } : {}),
       };
-    if (query.search) {
-      const text = new RegExp(escapeRegExp(query.search), "i");
-      filter.$or = [
-        { accountingDocument: text },
-        { employmentId: text },
-        { sourceKey: text },
-      ];
-    }
     const collection = this.collection<VacationSettlement>(
       "vacationSettlements",
     );
-    const [items, total] = await Promise.all([
-      collection
-        .find(filter, { projection: { sourceLines: 0 } })
-        .sort({ periodEndDate: -1, createdAt: -1 })
-        .skip((query.page - 1) * query.pageSize)
-        .limit(query.pageSize)
-        .toArray(),
-      collection.countDocuments(filter),
-    ]);
-    return { items: items.map(strip), total };
+    const pipeline: Record<string, unknown>[] = [
+      { $match: filter },
+      {
+        $lookup: {
+          from: "employments",
+          localField: "employmentId",
+          foreignField: "id",
+          as: "employment",
+        },
+      },
+      { $unwind: { path: "$employment", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "workers",
+          localField: "employment.workerId",
+          foreignField: "id",
+          as: "worker",
+        },
+      },
+      { $unwind: { path: "$worker", preserveNullAndEmptyArrays: true } },
+    ];
+    if (query.search?.trim()) {
+      const text = new RegExp(escapeRegExp(query.search.trim()), "i");
+      const normalized = query.search.replace(/\D/g, "");
+      pipeline.push({
+        $match: {
+          $or: [
+            { accountingDocument: text },
+            { employmentId: text },
+            { sourceKey: text },
+            { "worker.fullName": text },
+            { "worker.documentNumber": text },
+            {
+              "worker.normalizedDocumentNumber": normalized
+                ? new RegExp(`^${escapeRegExp(normalized)}`)
+                : text,
+            },
+          ],
+        },
+      });
+    }
+    pipeline.push({
+      $facet: {
+        items: [
+          { $sort: { periodEndDate: -1, createdAt: -1 } },
+          { $skip: (query.page - 1) * query.pageSize },
+          { $limit: query.pageSize },
+          {
+            $project: {
+              _id: 0,
+              id: 1,
+              employmentId: 1,
+              sourceScheduleId: 1,
+              sourceBatchId: 1,
+              sourceKey: 1,
+              source: 1,
+              status: 1,
+              enjoymentStartDate: 1,
+              enjoymentEndDate: 1,
+              periodEndDate: 1,
+              enjoyedDays: 1,
+              compensatedDays: 1,
+              calendarDays: 1,
+              amountCOP: 1,
+              accountingDocument: 1,
+              observation: 1,
+              allocations: 1,
+              version: 1,
+              cancelledAt: 1,
+              cancelledBy: 1,
+              cancellationReason: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              employeeName: "$worker.fullName",
+              employeeDocumentNumber: "$worker.documentNumber",
+            },
+          },
+        ],
+        total: [{ $count: "value" }],
+      },
+    });
+    const [result] = await collection
+      .aggregate<{
+        items: (VacationSettlement & {
+          employeeName?: string;
+          employeeDocumentNumber?: string;
+        })[];
+        total: { value: number }[];
+      }>(pipeline)
+      .toArray();
+    return {
+      items: result?.items ?? [],
+      total: result?.total[0]?.value ?? 0,
+    };
   }
   async findSettlementsByEmploymentIds(ids: string[]) {
     if (!ids.length) return [];
@@ -577,9 +680,48 @@ export class MongoStore implements VacationStore {
     ).map(strip);
   }
   async findSettlementById(id: string) {
-    const doc = await this.collection<VacationSettlement>(
+    const [doc] = await this.collection<VacationSettlement>(
       "vacationSettlements",
-    ).findOne({ id });
+    )
+      .aggregate<
+        VacationSettlement & {
+          employeeName?: string;
+          employeeDocumentNumber?: string;
+        }
+      >([
+        { $match: { id } },
+        {
+          $lookup: {
+            from: "employments",
+            localField: "employmentId",
+            foreignField: "id",
+            as: "employment",
+          },
+        },
+        {
+          $unwind: {
+            path: "$employment",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $lookup: {
+            from: "workers",
+            localField: "employment.workerId",
+            foreignField: "id",
+            as: "worker",
+          },
+        },
+        { $unwind: { path: "$worker", preserveNullAndEmptyArrays: true } },
+        {
+          $set: {
+            employeeName: "$worker.fullName",
+            employeeDocumentNumber: "$worker.documentNumber",
+          },
+        },
+        { $project: { employment: 0, worker: 0 } },
+      ])
+      .toArray();
     return doc ? strip(doc) : null;
   }
   async findSettlementBySourceKey(sourceKey: string) {
@@ -627,6 +769,42 @@ export class MongoStore implements VacationStore {
       "vacationSettlementImportBatches",
     ).replaceOne({ id: batch.id }, batch, { upsert: true });
   }
+  async findVacationPeriodClosureBatch(id: string) {
+    const doc = await this.collection<VacationPeriodClosureBatch>(
+      "vacationPeriodClosureBatches",
+    ).findOne({ id });
+    return doc ? strip(doc) : null;
+  }
+  async findVacationPeriodClosureByFileHash(fileHash: string) {
+    const doc = await this.collection<VacationPeriodClosureBatch>(
+      "vacationPeriodClosureBatches",
+    ).findOne({ fileHash }, { sort: { createdAt: -1 } });
+    return doc ? strip(doc) : null;
+  }
+  async saveVacationPeriodClosureBatch(batch: VacationPeriodClosureBatch) {
+    await this.collection<VacationPeriodClosureBatch>(
+      "vacationPeriodClosureBatches",
+    ).replaceOne({ id: batch.id }, batch, { upsert: true });
+  }
+  async findVacationPendingPeriodImportBatch(id: string) {
+    const doc = await this.collection<VacationPendingPeriodImportBatch>(
+      "vacationPendingPeriodImportBatches",
+    ).findOne({ id });
+    return doc ? strip(doc) : null;
+  }
+  async findVacationPendingPeriodImportByFileHash(fileHash: string) {
+    const doc = await this.collection<VacationPendingPeriodImportBatch>(
+      "vacationPendingPeriodImportBatches",
+    ).findOne({ fileHash }, { sort: { createdAt: -1 } });
+    return doc ? strip(doc) : null;
+  }
+  async saveVacationPendingPeriodImportBatch(
+    batch: VacationPendingPeriodImportBatch,
+  ) {
+    await this.collection<VacationPendingPeriodImportBatch>(
+      "vacationPendingPeriodImportBatches",
+    ).replaceOne({ id: batch.id }, batch, { upsert: true });
+  }
   async findSessionById(id: string) {
     const doc = await this.collection<Session>("sessions").findOne({ id });
     return doc ? strip(doc) : null;
@@ -656,6 +834,19 @@ export class MongoStore implements VacationStore {
     await this.collection<CatalogItem>("catalogItems").replaceOne(
       { id: item.id },
       item,
+      { upsert: true },
+    );
+  }
+  async findSystemSettingByKey(key: string) {
+    const doc = await this.collection<SystemSetting>("systemSettings").findOne({
+      key,
+    });
+    return doc ? strip(doc) : null;
+  }
+  async saveSystemSetting(setting: SystemSetting) {
+    await this.collection<SystemSetting>("systemSettings").replaceOne(
+      { key: setting.key },
+      setting,
       { upsert: true },
     );
   }
@@ -873,6 +1064,7 @@ export class MongoStore implements VacationStore {
       metadata: unknown;
       createdAt: string;
     }[],
+    schedules: VacationSchedule[] = [],
   ) {
     await this.client.withSession(async (session) => {
       await session.withTransaction(async () => {
@@ -900,6 +1092,17 @@ export class MongoStore implements VacationStore {
             })),
             { session },
           );
+        if (schedules.length)
+          await this.collection<VacationSchedule>("vacationSchedules").bulkWrite(
+            schedules.map((schedule) => ({
+              replaceOne: {
+                filter: { id: schedule.id },
+                replacement: schedule,
+                upsert: true,
+              },
+            })),
+            { session },
+          );
         await this.collection<VacationSettlementImportBatch>(
           "vacationSettlementImportBatches",
         ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
@@ -907,6 +1110,80 @@ export class MongoStore implements VacationStore {
           await this.collection<typeof event>("auditEvents").insertOne(event, {
             session,
           });
+      });
+    });
+  }
+  async applyVacationPeriodClosure(
+    batch: VacationPeriodClosureBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+  ) {
+    await this.client.withSession(async (session) => {
+      await session.withTransaction(async () => {
+        if (periods.length)
+          await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
+            periods.map((period) => ({
+              replaceOne: {
+                filter: { id: period.id },
+                replacement: period,
+                upsert: true,
+              },
+            })),
+            { session },
+          );
+        await this.collection<VacationPeriodClosureBatch>(
+          "vacationPeriodClosureBatches",
+        ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
+        if (audits.length)
+          await this.collection<(typeof audits)[number]>("auditEvents").insertMany(
+            audits,
+            { session },
+          );
+      });
+    });
+  }
+  async applyVacationPendingPeriodImport(
+    batch: VacationPendingPeriodImportBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+  ) {
+    await this.client.withSession(async (session) => {
+      await session.withTransaction(async () => {
+        if (periods.length)
+          await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
+            periods.map((period) => ({
+              replaceOne: {
+                filter: { id: period.id },
+                replacement: period,
+                upsert: true,
+              },
+            })),
+            { session },
+          );
+        await this.collection<VacationPendingPeriodImportBatch>(
+          "vacationPendingPeriodImportBatches",
+        ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
+        if (audits.length)
+          await this.collection<(typeof audits)[number]>("auditEvents").insertMany(
+            audits,
+            { session },
+          );
       });
     });
   }
@@ -1018,6 +1295,7 @@ export class MongoStore implements VacationStore {
       "auditEvents",
       "importBatches",
       "vacationSettlementImportBatches",
+      "vacationPendingPeriodImportBatches",
       "sessions",
       "catalogItems",
       "holidays",

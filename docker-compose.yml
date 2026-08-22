@@ -1,0 +1,52 @@
+services:
+  mongodb:
+    image: mongo:8
+    restart: unless-stopped
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" localhost:27017/test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  mongo-init:
+    image: mongo:8
+    restart: "no"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint: ["mongosh", "--host", "mongodb:27017", "--eval"]
+    command: "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb:27017'}]}) }"
+  api:
+    build: ./apps/api
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      STORAGE_MODE: mongo
+      MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0
+      MONGODB_DATABASE: efagram_vacaciones
+      JWT_SECRET: replace-with-at-least-32-random-characters
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      BOOTSTRAP_ADMIN_USERNAME: admin
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in the environment}
+      SEED_DEMO_DATA: "false"
+      SCHEDULER_ENABLED: "true"
+      SCHEDULER_INTERVAL_MS: "86400000"
+      CORS_ORIGINS: http://localhost:8080
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+  web:
+    build: ./apps/web
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+volumes:
+  mongo-data:

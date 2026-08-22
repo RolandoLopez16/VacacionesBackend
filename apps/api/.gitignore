@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.cache/
+.agents/
+.idea/
+.vscode/
+tmp/
+temp/

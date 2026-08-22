@@ -1,17 +1,21 @@
 {
-  "name": "vaca-efa-backend",
+  "name": "sistema-web-vaca-efa",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.1.0",
   "type": "module",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev": "npm run dev --workspace @vaca-efa/api",
-    "build": "npm run build --workspace @vaca-efa/contracts && npm run build --workspace @vaca-efa/api",
-    "typecheck": "npm run build --workspace @vaca-efa/contracts && npm run typecheck --workspace @vaca-efa/api",
+    "dev": "concurrently -n api,web -c green,blue \"npm run dev --workspace @vaca-efa/api\" \"npm run dev --workspace @vaca-efa/web\"",
+    "build": "npm run build --workspace @vaca-efa/contracts && npm run build --workspace @vaca-efa/api && npm run build --workspace @vaca-efa/web",
+    "typecheck": "npm run build --workspace @vaca-efa/contracts && npm run typecheck --workspace @vaca-efa/api && npm run typecheck --workspace @vaca-efa/web",
     "test": "npm run test --workspace @vaca-efa/api",
-    "lint": "npm run lint --workspace @vaca-efa/api"
+    "lint": "npm run lint --workspace @vaca-efa/api && npm run lint --workspace @vaca-efa/web",
+    "format": "prettier --write ."
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.1.2",
+    "prettier": "^3.6.2",
     "typescript": "^6.0.0",
     "vitest": "^3.2.4"
   }

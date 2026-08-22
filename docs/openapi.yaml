@@ -108,6 +108,24 @@ paths:
       summary: Desactivar festivo conservando auditoría
       parameters: [{$ref: '#/components/parameters/Id'}]
       responses: {'200': {description: Festivo desactivado}}
+  /api/v1/admin/users:
+    get:
+      summary: Listar usuarios sin credenciales sensibles
+      responses: {'200': {description: Usuarios administrativos}}
+    post:
+      summary: Crear usuario administrativo
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UserCreate'}}}
+      responses: {'201': {description: Usuario creado}, '409': {description: Usuario duplicado}}
+  /api/v1/admin/users/{id}:
+    patch:
+      summary: Editar, activar o inactivar usuario sin eliminarlo
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UserPatch'}}}
+      responses: {'200': {description: Usuario actualizado}, '409': {description: Usuario duplicado}, '422': {description: Regla de seguridad de administradores}}
   /api/v1/alerts:
     get:
       summary: Consultar alertas persistidas
@@ -135,7 +153,9 @@ paths:
         - {$ref: '#/components/parameters/PageSize'}
         - {name: accrualWithin, in: query, schema: {type: integer, minimum: 0}}
         - {name: status, in: query, schema: {type: string, enum: [ACTIVE, RETIRED]}}
+        - {name: vacationStatus, in: query, schema: {type: string, enum: [PENDING, SCHEDULED, OVERDUE, CLEAR]}, description: Estado de gestión de vacaciones}
         - {name: process, in: query, schema: {type: string}}
+        - {name: sort, in: query, schema: {type: string, enum: [pendingDays]}, description: Orden descendente por días pendientes}
         - {name: alert, in: query, schema: {type: string}}
         - {name: from, in: query, schema: {type: string, format: date}}
         - {name: to, in: query, schema: {type: string, format: date}}
@@ -296,6 +316,24 @@ components:
       properties:
         username: {type: string}
         password: {type: string, format: password}
+    UserCreate:
+      type: object
+      required: [username, password, role]
+      properties:
+        username: {type: string, minLength: 3}
+        displayName: {type: string, minLength: 2}
+        jobTitle: {type: string, minLength: 2}
+        password: {type: string, minLength: 8, format: password}
+        role: {type: string, enum: [ADMIN, HR, VIEWER, READ_ONLY]}
+    UserPatch:
+      type: object
+      properties:
+        username: {type: string, minLength: 3}
+        displayName: {type: string, minLength: 2}
+        jobTitle: {type: string, minLength: 2}
+        password: {type: string, minLength: 8, format: password}
+        role: {type: string, enum: [ADMIN, HR, VIEWER, READ_ONLY]}
+        active: {type: boolean}
     HolidayInput:
       type: object
       required: [date, name]

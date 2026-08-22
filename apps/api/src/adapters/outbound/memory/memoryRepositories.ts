@@ -6,10 +6,13 @@ import type {
   VacationSchedule,
   VacationSettlement,
   VacationSettlementImportBatch,
+  VacationPeriodClosureBatch,
+  VacationPendingPeriodImportBatch,
 } from "../../../domain/vacations/models.js";
 import type { User } from "../../../domain/auth/models.js";
 import type { Session } from "../../../domain/auth/session.js";
 import type { CatalogItem } from "../../../domain/admin/catalog.js";
+import type { SystemSetting } from "../../../domain/admin/settings.js";
 import type { Holiday } from "../../../domain/admin/holiday.js";
 import type { VacationAlert } from "../../../domain/vacations/alerts.js";
 import type { SchedulerRun } from "../../../domain/vacations/schedulerRun.js";
@@ -32,6 +35,7 @@ import type {
   SettlementRepository,
   TransactionRepository,
   VacationSettlementImportRepository,
+  VacationPendingPeriodImportRepository,
   WorkerRepository,
 } from "../../../application/ports/repositories.js";
 export class MemoryStore
@@ -45,6 +49,7 @@ export class MemoryStore
     AuditRepository,
     ImportBatchRepository,
     VacationSettlementImportRepository,
+    VacationPendingPeriodImportRepository,
     SessionRepository,
     CatalogRepository,
     HolidayRepository,
@@ -59,8 +64,11 @@ export class MemoryStore
   settlements = new Map<string, VacationSettlement>();
   importBatches = new Map<string, ImportBatch>();
   settlementImportBatches = new Map<string, VacationSettlementImportBatch>();
+  vacationPeriodClosureBatches = new Map<string, VacationPeriodClosureBatch>();
+  vacationPendingPeriodImportBatches = new Map<string, VacationPendingPeriodImportBatch>();
   sessions = new Map<string, Session>();
   catalogs = new Map<string, CatalogItem>();
+  systemSettings = new Map<string, SystemSetting>();
   holidays = new Map<string, Holiday>();
   alerts = new Map<string, VacationAlert>();
   schedulerRuns = new Map<string, SchedulerRun>();
@@ -249,32 +257,56 @@ export class MemoryStore
       selected.has(item.employmentId),
     );
   }
+  async findSchedulesByIds(ids: string[]) {
+    const selected = new Set(ids);
+    return [...this.schedules.values()].filter((item) => selected.has(item.id));
+  }
   async findScheduleById(id: string) {
     return this.schedules.get(id) ?? null;
   }
   async saveSchedule(v: VacationSchedule) {
     this.schedules.set(v.id, v);
   }
-  async listSettlements() {
+  async listSettlements(includeAnnulled = false) {
     return [...this.settlements.values()].filter(
-      (item) => item.status !== "ANULADA",
+      (item) => includeAnnulled || item.status !== "ANULADA",
     );
+  }
+  private withSettlementEmployee(item: VacationSettlement) {
+    const employment = this.employments.get(item.employmentId);
+    const worker = employment ? this.workers.get(employment.workerId) : undefined;
+    return {
+      ...item,
+      ...(worker
+        ? {
+            employeeName: worker.fullName,
+            employeeDocumentNumber: worker.documentNumber,
+          }
+        : {}),
+    };
   }
   async listSettlementPage(query: SettlementPageQuery) {
     const search = query.search?.toLowerCase().trim();
+    const employmentsById = new Map(this.employments);
+    const workersById = new Map(this.workers);
     const all = [...this.settlements.values()]
       .filter(
-        (item) =>
-          (query.status
-            ? item.status === query.status
-            : item.status !== "ANULADA") &&
-          (!query.employmentId || item.employmentId === query.employmentId) &&
-          (!query.fromDate || item.periodEndDate >= query.fromDate) &&
-          (!query.toDate || item.periodEndDate <= query.toDate) &&
-          (!search ||
-            `${item.accountingDocument} ${item.employmentId} ${item.sourceKey ?? ""}`
-              .toLowerCase()
-              .includes(search)),
+        (item) => {
+          const employment = employmentsById.get(item.employmentId);
+          const worker = employment ? workersById.get(employment.workerId) : undefined;
+          return (
+            (query.status
+              ? item.status === query.status
+              : item.status !== "ANULADA") &&
+            (!query.employmentId || item.employmentId === query.employmentId) &&
+            (!query.fromDate || item.periodEndDate >= query.fromDate) &&
+            (!query.toDate || item.periodEndDate <= query.toDate) &&
+            (!search ||
+              `${item.accountingDocument} ${item.employmentId} ${item.sourceKey ?? ""} ${worker?.fullName ?? ""} ${worker?.documentNumber ?? ""}`
+                .toLowerCase()
+                .includes(search))
+          );
+        },
       )
       .sort(
         (a, b) =>
@@ -283,7 +315,9 @@ export class MemoryStore
       );
     const start = (query.page - 1) * query.pageSize;
     return {
-      items: all.slice(start, start + query.pageSize),
+      items: all
+        .slice(start, start + query.pageSize)
+        .map((item) => this.withSettlementEmployee(item)),
       total: all.length,
     };
   }
@@ -294,7 +328,8 @@ export class MemoryStore
     );
   }
   async findSettlementById(id: string) {
-    return this.settlements.get(id) ?? null;
+    const item = this.settlements.get(id);
+    return item ? this.withSettlementEmployee(item) : null;
   }
   async findSettlementBySourceKey(sourceKey: string) {
     return (
@@ -327,6 +362,34 @@ export class MemoryStore
   ) {
     this.settlementImportBatches.set(batch.id, batch);
   }
+  async findVacationPeriodClosureBatch(id: string) {
+    return this.vacationPeriodClosureBatches.get(id) ?? null;
+  }
+  async findVacationPeriodClosureByFileHash(fileHash: string) {
+    return (
+      [...this.vacationPeriodClosureBatches.values()].find(
+        (batch) => batch.fileHash === fileHash,
+      ) ?? null
+    );
+  }
+  async saveVacationPeriodClosureBatch(batch: VacationPeriodClosureBatch) {
+    this.vacationPeriodClosureBatches.set(batch.id, batch);
+  }
+  async findVacationPendingPeriodImportBatch(id: string) {
+    return this.vacationPendingPeriodImportBatches.get(id) ?? null;
+  }
+  async findVacationPendingPeriodImportByFileHash(fileHash: string) {
+    return (
+      [...this.vacationPendingPeriodImportBatches.values()].find(
+        (batch) => batch.fileHash === fileHash,
+      ) ?? null
+    );
+  }
+  async saveVacationPendingPeriodImportBatch(
+    batch: VacationPendingPeriodImportBatch,
+  ) {
+    this.vacationPendingPeriodImportBatches.set(batch.id, batch);
+  }
   async findSessionById(id: string) {
     return this.sessions.get(id) ?? null;
   }
@@ -342,6 +405,12 @@ export class MemoryStore
   }
   async saveCatalog(item: CatalogItem) {
     this.catalogs.set(item.id, item);
+  }
+  async findSystemSettingByKey(key: string) {
+    return this.systemSettings.get(key) ?? null;
+  }
+  async saveSystemSetting(setting: SystemSetting) {
+    this.systemSettings.set(setting.key, setting);
   }
   async listHolidays(year?: number) {
     return [...this.holidays.values()].filter(
@@ -458,10 +527,46 @@ export class MemoryStore
       metadata: unknown;
       createdAt: string;
     }[],
+    schedules: VacationSchedule[] = [],
   ) {
     settlements.forEach((item) => this.settlements.set(item.id, item));
     periods.forEach((item) => this.periods.set(item.id, item));
+    schedules.forEach((item) => this.schedules.set(item.id, item));
     this.settlementImportBatches.set(batch.id, batch);
+    audits.forEach((event) => this.audits.push(event));
+  }
+  async applyVacationPeriodClosure(
+    batch: VacationPeriodClosureBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+  ) {
+    periods.forEach((item) => this.periods.set(item.id, item));
+    this.vacationPeriodClosureBatches.set(batch.id, batch);
+    audits.forEach((event) => this.audits.push(event));
+  }
+  async applyVacationPendingPeriodImport(
+    batch: VacationPendingPeriodImportBatch,
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+  ) {
+    periods.forEach((item) => this.periods.set(item.id, item));
+    this.vacationPendingPeriodImportBatches.set(batch.id, batch);
     audits.forEach((event) => this.audits.push(event));
   }
   async saveSettlementAndAudit(

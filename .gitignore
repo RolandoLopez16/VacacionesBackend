@@ -20,6 +20,7 @@ pnpm-debug.log*
 **/.vite/
 .cache/
 **/.cache/
+**/.agents/
 playwright-report/
 test-results/
 *.local
