@@ -94,30 +94,24 @@ function read(row: Record<string, unknown>, target: string) {
 }
 function parseDate(value: unknown, label: string, line: number): LocalDate {
   if (typeof value === "number" && Number.isFinite(value)) {
-    const output = new Date(
-      Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000),
-    );
+    const output = new Date(Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000));
     return `${output.getUTCFullYear()}-${String(output.getUTCMonth() + 1).padStart(2, "0")}-${String(output.getUTCDate()).padStart(2, "0")}` as LocalDate;
   }
   const raw = repair(String(value ?? "")).trim();
-  if (!raw || raw === "--")
-    throw new Error(`Fila ${line}: ${label} es obligatorio`);
-  let match = raw.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  if (!raw || raw === "--") throw new Error(`Fila ${line}: ${label} es obligatorio`);
+  let match = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (match)
     return parseLocalDate(
       `${match[1]}-${match[2]!.padStart(2, "0")}-${match[3]!.padStart(2, "0")}`,
     );
-  match = raw.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+  match = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
   if (match)
     return parseLocalDate(
       `${match[3]}-${match[2]!.padStart(2, "0")}-${match[1]!.padStart(2, "0")}`,
     );
-  match = raw
-    .toLowerCase()
-    .match(/^(\d{4})[-\/.]([a-záéíóú]+)[-\/.](\d{1,2})$/);
+  match = raw.toLowerCase().match(/^(\d{4})[-/.]([a-záéíóú]+)[-/.](\d{1,2})$/);
   if (match) {
-    const month =
-      months[match[2]!.normalize("NFD").replace(/[\u0300-\u036f]/g, "")];
+    const month = months[match[2]!.normalize("NFD").replace(/[\u0300-\u036f]/g, "")];
     if (month)
       return parseLocalDate(
         `${match[1]}-${String(month).padStart(2, "0")}-${match[3]!.padStart(2, "0")}`,
@@ -131,7 +125,9 @@ function optionalDate(value: unknown, label: string, line: number) {
 }
 function numberValue(value: unknown, label: string, line: number) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  const raw = repair(String(value ?? "")).trim().replace(/[$\s]/g, "");
+  const raw = repair(String(value ?? ""))
+    .trim()
+    .replace(/[$\s]/g, "");
   if (!raw || raw === "--") return 0;
   const normalized =
     raw.includes(",") && raw.includes(".")
@@ -144,8 +140,7 @@ function numberValue(value: unknown, label: string, line: number) {
           : raw.replace(",", ".")
         : raw;
   const result = Number(normalized);
-  if (!Number.isFinite(result))
-    throw new Error(`Fila ${line}: ${label} no es numérico`);
+  if (!Number.isFinite(result)) throw new Error(`Fila ${line}: ${label} no es numérico`);
   return result;
 }
 function text(value: unknown) {
@@ -167,16 +162,12 @@ export function normalizePendingPeriodRows(rows: PendingPeriodRawRow[]) {
   const warnings: string[] = [];
   for (const row of rows) {
     const values = Object.values(row.raw).map(text);
-    if (
-      values.length &&
-      values.every((value) => !value || value === "--" || /^[-]+$/.test(value))
-    )
+    if (values.length && values.every((value) => !value || value === "--" || /^[-]+$/.test(value)))
       continue;
     try {
       const employee = text(read(row.raw, "employee"));
       const name = text(read(row.raw, "name"));
-      if (!employee || !name)
-        throw new Error("requiere Empleado y Nombre");
+      if (!employee || !name) throw new Error("requiere Empleado y Nombre");
       const pendingPeriods = numberValue(
         read(row.raw, "pendingPeriods"),
         "Periodo Pendiente",
@@ -187,20 +178,11 @@ export function normalizePendingPeriodRows(rows: PendingPeriodRawRow[]) {
         "Dias Pendientes",
         row.lineNumber,
       );
-      const totalDays = numberValue(
-        read(row.raw, "totalDays"),
-        "Total Dias",
-        row.lineNumber,
-      );
+      const totalDays = numberValue(read(row.raw, "totalDays"), "Total Dias", row.lineNumber);
       if (!Number.isInteger(pendingPeriods) || pendingPeriods < 0)
         throw new Error("Periodo Pendiente debe ser un entero no negativo");
-      if (pendingDays < 0 || totalDays < 0)
-        throw new Error("Los días no pueden ser negativos");
-      const hireDate = parseDate(
-        read(row.raw, "hireDate"),
-        "Fecha Ing.",
-        row.lineNumber,
-      );
+      if (pendingDays < 0 || totalDays < 0) throw new Error("Los días no pueden ser negativos");
+      const hireDate = parseDate(read(row.raw, "hireDate"), "Fecha Ing.", row.lineNumber);
       const line: NormalizedPendingPeriodLine = {
         lineNumber: row.lineNumber,
         lineHash: createHash("sha256").update(stable(row.raw)).digest("hex"),

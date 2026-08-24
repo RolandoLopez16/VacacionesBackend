@@ -29,17 +29,23 @@ function date(value: string) {
 }
 
 function text(value: unknown) {
-  return String(value ?? "—").replace(/\s+/g, " ").trim() || "—";
+  return (
+    String(value ?? "—")
+      .replace(/\s+/g, " ")
+      .trim() || "—"
+  );
 }
 
 function status(value: string) {
   return (
-    {
-      SCHEDULED: "Programado",
-      COMPLETED: "Completado",
-      CANCELLED: "Cancelado",
-    } as Record<string, string>
-  )[value] ?? value;
+    (
+      {
+        SCHEDULED: "Programado",
+        COMPLETED: "Completado",
+        CANCELLED: "Cancelado",
+      } as Record<string, string>
+    )[value] ?? value
+  );
 }
 
 function periodSummary(item: AnnualScheduleReport["items"][number]) {
@@ -51,6 +57,13 @@ function periodSummary(item: AnnualScheduleReport["items"][number]) {
     .join("; ");
 }
 
+function truncate(value: string, maxWidth: number, document: PDFKit.PDFDocument): string {
+  if (document.widthOfString(value) <= maxWidth) return value;
+  let end = value.length;
+  while (end > 0 && document.widthOfString(`${value.slice(0, end)}…`) > maxWidth) end -= 1;
+  return `${value.slice(0, end)}…`;
+}
+
 function drawFooter(document: PDFKit.PDFDocument, page: number) {
   const y = PAGE_HEIGHT - 24;
   document
@@ -58,38 +71,36 @@ function drawFooter(document: PDFKit.PDFDocument, page: number) {
     .moveTo(MARGIN, y - 6)
     .lineTo(PAGE_WIDTH - MARGIN, y - 6)
     .stroke();
-  document
-    .font("Helvetica")
-    .fontSize(7)
-    .fillColor(MUTED)
-    .text("EFAGRAM · Documento de programación de vacaciones", MARGIN, y, {
-      width: 500,
-    })
-    .text(`Página ${page}`, PAGE_WIDTH - 100, y, { width: 72, align: "right" });
+  document.font("Helvetica").fontSize(7).fillColor(MUTED);
+  // lineBreak: false y sin width evita que PDFKit dispare su paginación
+  // automática al dibujar texto por debajo del margen inferior (y > maxY).
+  document.text("EFAGRAM · Documento de programación de vacaciones", MARGIN, y, {
+    lineBreak: false,
+  });
+  const pageLabel = `Página ${page}`;
+  document.text(pageLabel, PAGE_WIDTH - 100 + 72 - document.widthOfString(pageLabel), y, {
+    lineBreak: false,
+  });
 }
 
-function drawTitle(
-  document: PDFKit.PDFDocument,
-  report: AnnualScheduleReport,
-  firstPage: boolean,
-) {
+function drawTitle(document: PDFKit.PDFDocument, report: AnnualScheduleReport, firstPage: boolean) {
   let y = MARGIN;
-  document.font("Helvetica-Bold").fontSize(firstPage ? 16 : 11).fillColor(HEADER_FILL);
-  document.text("PROGRAMACIÓN ANUAL DE VACACIONES", MARGIN, y);
+  document
+    .font("Helvetica-Bold")
+    .fontSize(firstPage ? 16 : 11)
+    .fillColor(HEADER_FILL);
+  document.text("PROGRAMACIÓN DE VACACIONES", MARGIN, y, { lineBreak: false });
   y += firstPage ? 22 : 16;
   document.font("Helvetica").fontSize(8).fillColor(MUTED);
   document.text(
-    `EFAGRAM · Año ${report.year} · Generado ${date(report.generatedAt.slice(0, 10))} ${report.generatedAt.slice(11, 16)}`,
+    `EFAGRAM · ${report.rangeLabel} · Generado ${date(report.generatedAt.slice(0, 10))} ${report.generatedAt.slice(11, 16)}`,
     MARGIN,
     y,
+    { lineBreak: false },
   );
   y += 15;
   if (!firstPage) return y + 3;
-  document
-    .fontSize(8)
-    .fillColor("#ffffff")
-    .rect(MARGIN, y, TABLE_WIDTH, 32)
-    .fill("#e9f3ee");
+  document.fontSize(8).fillColor("#ffffff").rect(MARGIN, y, TABLE_WIDTH, 32).fill("#e9f3ee");
   const summary: [string, string][] = [
     [`${report.totalEmployees}`, "Empleados"],
     [`${report.totalSchedules}`, "Programaciones"],
@@ -98,8 +109,10 @@ function drawTitle(
   const summaryWidth = TABLE_WIDTH / summary.length;
   summary.forEach(([value, label], index) => {
     const x = MARGIN + index * summaryWidth + 10;
-    document.font("Helvetica-Bold").fontSize(12).fillColor(HEADER_FILL).text(value, x, y + 5);
-    document.font("Helvetica").fontSize(7).fillColor(MUTED).text(label, x + 38, y + 9, {
+    document.font("Helvetica-Bold").fontSize(12).fillColor(HEADER_FILL);
+    document.text(value, x, y + 5, { lineBreak: false });
+    document.font("Helvetica").fontSize(7).fillColor(MUTED);
+    document.text(label, x + 38, y + 9, {
       width: summaryWidth - 48,
     });
   });
@@ -108,11 +121,16 @@ function drawTitle(
     .filter((month) => month.schedules > 0)
     .map((month) => `${month.label}: ${month.schedules} prog. / ${month.days} días`)
     .join(" · ");
-  document.font("Helvetica").fontSize(7.5).fillColor(MUTED).text(
-    months || "No hay programaciones para los filtros seleccionados.",
+  document.font("Helvetica").fontSize(7.5).fillColor(MUTED);
+  document.text(
+    truncate(
+      months || "No hay programaciones para los filtros seleccionados.",
+      TABLE_WIDTH,
+      document,
+    ),
     MARGIN,
     y,
-    { width: TABLE_WIDTH },
+    { width: TABLE_WIDTH, lineBreak: false },
   );
   return y + 20;
 }
@@ -122,10 +140,30 @@ function drawTableHeader(document: PDFKit.PDFDocument, y: number) {
   let x = MARGIN;
   document.font("Helvetica-Bold").fontSize(7).fillColor("#ffffff");
   for (const column of columns) {
-    document.text(column.label, x + 3, y + 7, { width: column.width - 6, align: "left" });
+    document.text(column.label, x + 3, y + 7, {
+      width: column.width - 6,
+      align: "left",
+      lineBreak: false,
+    });
     x += column.width;
   }
   return y + 22;
+}
+
+function rowValues(item: AnnualScheduleReport["items"][number], index: number): string[] {
+  return [
+    String(index + 1),
+    text(item.employeeDocumentNumber),
+    text(item.employeeName),
+    text(item.processName),
+    text(item.positionName),
+    text(item.supervisorName),
+    date(item.startDate),
+    date(item.endDate),
+    String(item.scheduledDays),
+    status(item.status),
+    periodSummary(item),
+  ];
 }
 
 function drawTableRow(
@@ -140,16 +178,11 @@ function drawTableRow(
   document.font("Helvetica").fontSize(6.5).fillColor("#22332d");
   row.forEach((value, index) => {
     const column = columns[index]!;
-    document
-      .strokeColor(LINE_COLOR)
-      .rect(x, y, column.width, height)
-      .stroke()
-      .fillColor("#22332d")
-      .text(value, x + 3, y + 5, {
-        width: column.width - 6,
-        height: height - 8,
-        ellipsis: true,
-      });
+    document.strokeColor(LINE_COLOR).rect(x, y, column.width, height).stroke().fillColor("#22332d");
+    document.text(truncate(value, column.width - 6, document), x + 3, y + 5, {
+      width: column.width - 6,
+      lineBreak: false,
+    });
     x += column.width;
   });
 }
@@ -161,9 +194,9 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
       layout: "landscape",
       margins: { top: MARGIN, bottom: 34, left: MARGIN, right: MARGIN },
       info: {
-        Title: `Programación anual de vacaciones ${report.year}`,
+        Title: `Programación de vacaciones · ${report.rangeLabel}`,
         Author: report.preparedBy,
-        Subject: "Programación anual de vacaciones",
+        Subject: "Programación de vacaciones",
       },
     });
     const chunks: Buffer[] = [];
@@ -171,30 +204,20 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
     document.on("error", reject);
     document.on("end", () => resolve(Buffer.concat(chunks)));
 
+    const rowHeights = report.items.map((item, index) => {
+      document.font("Helvetica").fontSize(6.5);
+      const heights = rowValues(item, index).map((value, rowIndex) =>
+        document.heightOfString(value, { width: columns[rowIndex]!.width - 6 }),
+      );
+      return Math.max(20, Math.min(48, Math.max(...heights) + 10));
+    });
+
     let page = 1;
     let y = drawTitle(document, report, true);
     y = drawTableHeader(document, y);
+
     report.items.forEach((item, index) => {
-      const row = [
-        String(index + 1),
-        text(item.employeeDocumentNumber),
-        text(item.employeeName),
-        text(item.processName),
-        text(item.positionName),
-        text(item.supervisorName),
-        date(item.startDate),
-        date(item.endDate),
-        String(item.scheduledDays),
-        status(item.status),
-        periodSummary(item),
-      ];
-      document.font("Helvetica").fontSize(6.5);
-      const heights = row.map((value, rowIndex) =>
-        document.heightOfString(value, {
-          width: columns[rowIndex]!.width - 6,
-        }),
-      );
-      const rowHeight = Math.max(20, Math.min(48, Math.max(...heights) + 10));
+      const rowHeight = rowHeights[index]!;
       if (y + rowHeight > PAGE_HEIGHT - 38) {
         drawFooter(document, page);
         document.addPage();
@@ -202,22 +225,23 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
         y = drawTitle(document, report, false);
         y = drawTableHeader(document, y);
       }
-      drawTableRow(document, row, y, rowHeight, index % 2 === 1);
+      drawTableRow(document, rowValues(item, index), y, rowHeight, index % 2 === 1);
       y += rowHeight;
     });
 
-    if (y + 74 > PAGE_HEIGHT - 38) {
+    if (y + 110 > PAGE_HEIGHT - 38) {
       drawFooter(document, page);
       document.addPage();
       page += 1;
       y = drawTitle(document, report, false);
     }
     y += 24;
-    document.font("Helvetica").fontSize(7.5).fillColor(MUTED).text(
+    document.font("Helvetica").fontSize(7.5).fillColor(MUTED);
+    document.text(
       "La información corresponde a cronogramas registrados en el sistema y conserva la trazabilidad de cada programación.",
       MARGIN,
       y,
-      { width: TABLE_WIDTH },
+      { width: TABLE_WIDTH, lineBreak: false },
     );
     y += 34;
     const signatureWidth = 250;
@@ -227,19 +251,22 @@ export function buildAnnualSchedulePdf(report: AnnualScheduleReport): Promise<Bu
     ];
     signatures.forEach(([label, value], index) => {
       const x = MARGIN + index * 360;
-      document
-        .font("Helvetica-Bold")
-        .fontSize(8)
-        .fillColor(HEADER_FILL)
-        .text(value, x, y - 16, {
-          width: signatureWidth,
-          align: "center",
-          ellipsis: true,
-        });
-      document.strokeColor(MUTED).moveTo(x, y).lineTo(x + signatureWidth, y).stroke();
-      document.font("Helvetica").fontSize(8).fillColor(MUTED).text(label, x, y + 5, {
+      document.font("Helvetica-Bold").fontSize(8).fillColor(HEADER_FILL);
+      document.text(truncate(value, signatureWidth, document), x, y - 16, {
         width: signatureWidth,
         align: "center",
+        lineBreak: false,
+      });
+      document
+        .strokeColor(MUTED)
+        .moveTo(x, y)
+        .lineTo(x + signatureWidth, y)
+        .stroke();
+      document.font("Helvetica").fontSize(8).fillColor(MUTED);
+      document.text(label, x, y + 5, {
+        width: signatureWidth,
+        align: "center",
+        lineBreak: false,
       });
     });
     drawFooter(document, page);

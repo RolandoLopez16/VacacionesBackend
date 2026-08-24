@@ -3,10 +3,7 @@ import { createApp } from "./app.js";
 import { env } from "../infrastructure/config/env.js";
 import { MongoStore } from "../adapters/outbound/mongodb/mongoStore.js";
 import { MemoryStore } from "../adapters/outbound/memory/memoryRepositories.js";
-import {
-  AuthService,
-  refreshSecretFrom,
-} from "../application/services/authService.js";
+import { AuthService, refreshSecretFrom } from "../application/services/authService.js";
 import { VacationAccrualScheduler } from "../application/services/vacationScheduler.js";
 const store =
   env.STORAGE_MODE === "mongo"
@@ -22,10 +19,7 @@ const auth = new AuthService(
   },
   store,
 );
-await auth.ensureAdmin(
-  env.BOOTSTRAP_ADMIN_USERNAME,
-  env.BOOTSTRAP_ADMIN_PASSWORD,
-);
+await auth.ensureAdmin(env.BOOTSTRAP_ADMIN_USERNAME, env.BOOTSTRAP_ADMIN_PASSWORD);
 const app = await createApp(store, env.SEED_DEMO_DATA, auth);
 const server = createServer(app);
 server.once("error", (error: NodeJS.ErrnoException) => {
@@ -40,17 +34,14 @@ server.once("error", (error: NodeJS.ErrnoException) => {
   process.exitCode = 1;
 });
 server.listen(env.PORT, () =>
-  console.log(
-    `Vaca EFA API listening on http://localhost:${env.PORT} (${env.STORAGE_MODE})`,
-  ),
+  console.log(`Vaca EFA API listening on http://localhost:${env.PORT} (${env.STORAGE_MODE})`),
 );
 const scheduler = new VacationAccrualScheduler(store);
 if (env.SCHEDULER_ENABLED) scheduler.start(env.SCHEDULER_INTERVAL_MS);
 const shutdown = async (signal: string) => {
   console.log(`Received ${signal}; shutting down gracefully`);
   server.close(async () => {
-    if ("close" in store && typeof store.close === "function")
-      await store.close();
+    if ("close" in store && typeof store.close === "function") await store.close();
     process.exit(0);
   });
   setTimeout(() => process.exit(1), 10_000).unref();

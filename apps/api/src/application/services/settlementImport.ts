@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  parseLocalDate,
-  type LocalDate,
-} from "../../domain/shared/localDate.js";
+import { parseLocalDate, type LocalDate } from "../../domain/shared/localDate.js";
 import type { VacationSettlementSourceLine } from "../../domain/vacations/models.js";
 
 export type SettlementRawRow = {
@@ -114,30 +111,24 @@ function read(row: Record<string, unknown>, target: string) {
 }
 function date(value: unknown, label: string, line: number): LocalDate {
   if (typeof value === "number" && Number.isFinite(value)) {
-    const output = new Date(
-      Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000),
-    );
+    const output = new Date(Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000));
     return `${output.getUTCFullYear()}-${String(output.getUTCMonth() + 1).padStart(2, "0")}-${String(output.getUTCDate()).padStart(2, "0")}` as LocalDate;
   }
   const raw = repair(String(value ?? "")).trim();
-  if (!raw || raw === "--")
-    throw new Error(`Fila ${line}: ${label} es obligatorio`);
-  let match = raw.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  if (!raw || raw === "--") throw new Error(`Fila ${line}: ${label} es obligatorio`);
+  let match = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (match)
     return parseLocalDate(
       `${match[1]}-${match[2]!.padStart(2, "0")}-${match[3]!.padStart(2, "0")}`,
     );
-  match = raw.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+  match = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
   if (match)
     return parseLocalDate(
       `${match[3]}-${match[2]!.padStart(2, "0")}-${match[1]!.padStart(2, "0")}`,
     );
-  match = raw
-    .toLowerCase()
-    .match(/^(\d{4})[-\/.]([a-záéíóú]+)[-\/.](\d{1,2})$/);
+  match = raw.toLowerCase().match(/^(\d{4})[-/.]([a-záéíóú]+)[-/.](\d{1,2})$/);
   if (match) {
-    const month =
-      months[match[2]!.normalize("NFD").replace(/[\u0300-\u036f]/g, "")];
+    const month = months[match[2]!.normalize("NFD").replace(/[\u0300-\u036f]/g, "")];
     if (month)
       return parseLocalDate(
         `${match[1]}-${String(month).padStart(2, "0")}-${match[3]!.padStart(2, "0")}`,
@@ -162,8 +153,7 @@ function number(value: unknown, label: string, line: number) {
           : raw.replace(",", ".")
         : raw;
   const result = Number(normalized);
-  if (!Number.isFinite(result))
-    throw new Error(`Fila ${line}: ${label} no es numérico`);
+  if (!Number.isFinite(result)) throw new Error(`Fila ${line}: ${label} no es numérico`);
   return result;
 }
 function text(value: unknown) {
@@ -185,10 +175,7 @@ export function normalizeSettlementRows(rows: SettlementRawRow[]) {
   for (const row of rows) {
     const raw = row.raw;
     const values = Object.values(raw).map((value) => text(value));
-    if (
-      values.length &&
-      values.every((value) => !value || value === "--" || /^[-]+$/.test(value))
-    )
+    if (values.length && values.every((value) => !value || value === "--" || /^[-]+$/.test(value)))
       continue;
     try {
       const employee = text(read(raw, "employee"));
@@ -202,57 +189,26 @@ export function normalizeSettlementRows(rows: SettlementRawRow[]) {
         employee,
         name,
         ndc: text(read(raw, "ndc")),
-        normalizedDocument:
-          employee.replace(/\D/g, "") || employee.toUpperCase(),
+        normalizedDocument: employee.replace(/\D/g, "") || employee.toUpperCase(),
         startDate: date(read(raw, "startDate"), "Fecha Ing.", row.lineNumber),
-        periodEndDate: date(
-          read(raw, "periodEndDate"),
-          "Fecha Vaca.",
-          row.lineNumber,
-        ),
-        periodStartDate: date(
-          read(raw, "periodStartDate"),
-          "Periodo Liq. Ini.",
-          row.lineNumber,
-        ),
-        periodFinishDate: date(
-          read(raw, "periodFinishDate"),
-          "Periodo Liq. Fin.",
-          row.lineNumber,
-        ),
+        periodEndDate: date(read(raw, "periodEndDate"), "Fecha Vaca.", row.lineNumber),
+        periodStartDate: date(read(raw, "periodStartDate"), "Periodo Liq. Ini.", row.lineNumber),
+        periodFinishDate: date(read(raw, "periodFinishDate"), "Periodo Liq. Fin.", row.lineNumber),
         enjoymentStartDate: date(
           read(raw, "enjoymentStartDate"),
           "Vaca. Disfru. Ini.",
           row.lineNumber,
         ),
-        enjoymentEndDate: date(
-          read(raw, "enjoymentEndDate"),
-          "Vaca. Disfru. Fin.",
-          row.lineNumber,
-        ),
-        takenDays: number(
-          read(raw, "takenDays"),
-          "Días tomados",
-          row.lineNumber,
-        ),
-        compensatedDays: number(
-          read(raw, "compensatedDays"),
-          "Días compensados",
-          row.lineNumber,
-        ),
-        calendarDays: number(
-          read(raw, "calendarDays"),
-          "Días disfruta",
-          row.lineNumber,
-        ),
+        enjoymentEndDate: date(read(raw, "enjoymentEndDate"), "Vaca. Disfru. Fin.", row.lineNumber),
+        takenDays: number(read(raw, "takenDays"), "Días tomados", row.lineNumber),
+        compensatedDays: number(read(raw, "compensatedDays"), "Días compensados", row.lineNumber),
+        calendarDays: number(read(raw, "calendarDays"), "Días disfruta", row.lineNumber),
         amountCOP: number(read(raw, "amountCOP"), "Valor", row.lineNumber),
         accountingDocument,
         raw,
       };
       if (line.periodFinishDate < line.periodStartDate)
-        throw new Error(
-          "Periodo Liq. Fin. no puede ser menor que Periodo Liq. Ini.",
-        );
+        throw new Error("Periodo Liq. Fin. no puede ser menor que Periodo Liq. Ini.");
       if (line.takenDays < 0 || line.compensatedDays < 0)
         throw new Error("Los días no pueden ser negativos");
       normalized.push(line);
@@ -265,9 +221,7 @@ export function normalizeSettlementRows(rows: SettlementRawRow[]) {
   }
   return { lines: normalized, errors };
 }
-export function groupSettlementLines(
-  lines: NormalizedSettlementLine[],
-): SettlementGroup[] {
+export function groupSettlementLines(lines: NormalizedSettlementLine[]): SettlementGroup[] {
   const groups = new Map<string, NormalizedSettlementLine[]>();
   for (const line of lines) {
     const key = `${line.normalizedDocument}|${line.accountingDocument.toUpperCase()}`;
@@ -275,9 +229,7 @@ export function groupSettlementLines(
   }
   return [...groups.entries()].map(([sourceKey, groupLines]) => {
     const lines = [...groupLines].sort(
-      (a, b) =>
-        a.periodStartDate.localeCompare(b.periodStartDate) ||
-        a.lineNumber - b.lineNumber,
+      (a, b) => a.periodStartDate.localeCompare(b.periodStartDate) || a.lineNumber - b.lineNumber,
     );
     const warnings: string[] = [];
     for (let index = 1; index < lines.length; index++) {
@@ -309,20 +261,15 @@ export function groupSettlementLines(
       rangeEnd: last.periodFinishDate,
       periodEndDate: last.periodEndDate,
       enjoymentStartDate: lines.reduce(
-        (min, line) =>
-          line.enjoymentStartDate < min ? line.enjoymentStartDate : min,
+        (min, line) => (line.enjoymentStartDate < min ? line.enjoymentStartDate : min),
         first.enjoymentStartDate,
       ),
       enjoymentEndDate: lines.reduce(
-        (max, line) =>
-          line.enjoymentEndDate > max ? line.enjoymentEndDate : max,
+        (max, line) => (line.enjoymentEndDate > max ? line.enjoymentEndDate : max),
         first.enjoymentEndDate,
       ),
       enjoyedDays: lines.reduce((total, line) => total + line.takenDays, 0),
-      compensatedDays: lines.reduce(
-        (total, line) => total + line.compensatedDays,
-        0,
-      ),
+      compensatedDays: lines.reduce((total, line) => total + line.compensatedDays, 0),
       calendarDays: lines.reduce((total, line) => total + line.calendarDays, 0),
       amountCOP: lines.reduce((total, line) => total + line.amountCOP, 0),
       warnings,

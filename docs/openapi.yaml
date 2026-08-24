@@ -27,6 +27,22 @@ paths:
       summary: Readiness probe y conexión de almacenamiento
       responses:
         '200': {description: Servicio listo}
+  /api/v1/public/vacation-stats:
+    get:
+      security: []
+      summary: Conteo público de próximas causaciones
+      description: Devuelve únicamente la cantidad agregada de vínculos activos que causarán un período en los próximos 90 días, calculada con los datos reales del sistema. No expone datos personales ni requiere sesión.
+      responses:
+        '200':
+          description: Conteo agregado
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asOf, upcoming90Days]
+                properties:
+                  asOf: {type: string, format: date}
+                  upcoming90Days: {type: integer, minimum: 0}
   /api/v1/auth/login:
     post:
       security: []
@@ -75,10 +91,36 @@ paths:
         - {name: process, in: query, schema: {type: string}}
       responses:
         '200': {description: Dashboard}
+  /api/v1/dashboard/employments:
+    get:
+      summary: Listar los empleados que componen un indicador del dashboard
+      description: Aplica el mismo corte y filtros del dashboard, calcula los resúmenes por lote y devuelve únicamente la página solicitada. HEALTH exige healthStatus y PROCESS exige detailProcess.
+      parameters:
+        - name: kind
+          in: query
+          required: true
+          schema: {type: string, enum: [ACTIVE, PENDING_PERIODS, PENDING_DAYS, COVERAGE, PENDING_EMPLOYEES, SCHEDULED, OVERDUE, ENJOYED, COMPENSATED, UPCOMING, PRIORITY, HEALTH, PROCESS]}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: asOf, in: query, schema: {type: string, format: date}}
+        - {name: from, in: query, schema: {type: string, format: date}}
+        - {name: to, in: query, schema: {type: string, format: date}}
+        - {name: status, in: query, schema: {type: string, enum: [ACTIVE, RETIRED]}}
+        - {name: process, in: query, schema: {type: string}, description: Filtro general por proceso}
+        - {name: healthStatus, in: query, schema: {type: string, enum: [UP_TO_DATE, PROGRAMMED, PARTIAL, PENDING, OVERDUE]}, description: Obligatorio cuando kind es HEALTH}
+        - {name: detailProcess, in: query, schema: {type: string}, description: Proceso exacto obligatorio cuando kind es PROCESS}
+      responses:
+        '200':
+          description: Página de empleados asociados al indicador
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DashboardDetailPage'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
   /api/v1/holidays:
     get:
-      security: []
-      summary: Consultar festivos activos por año
+      summary: Consultar festivos por año con una sesión de lectura
       parameters: [{name: year, in: query, schema: {type: integer, minimum: 2000}}]
       responses: {'200': {description: Festivos configurados}}
   /api/v1/admin/holidays:
@@ -126,6 +168,35 @@ paths:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/UserPatch'}}}
       responses: {'200': {description: Usuario actualizado}, '409': {description: Usuario duplicado}, '422': {description: Regla de seguridad de administradores}}
+  /api/v1/admin/settings/{key}:
+    get:
+      summary: Consultar un ajuste del sistema
+      description: "Claves admitidas: GERENTE (firma del PDF anual) y VACATION_CLOSURE_FROM_DATE (fecha de corte de los cierres históricos, formato YYYY-MM-DD, por defecto 2025-01-01)."
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: {type: string, enum: [GERENTE, VACATION_CLOSURE_FROM_DATE]}
+      responses:
+        '200': {description: Ajuste persistido o vacío cuando no existe}
+        '404': {description: Clave no admitida}
+    patch:
+      summary: Guardar un ajuste del sistema
+      description: VACATION_CLOSURE_FROM_DATE exige una fecha válida YYYY-MM-DD. El cambio queda auditado como SYSTEM_SETTING_UPDATED.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: {type: string, enum: [GERENTE, VACATION_CLOSURE_FROM_DATE]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [value], properties: {value: {type: string}}}
+      responses:
+        '200': {description: Ajuste guardado}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '404': {description: Clave no admitida}
   /api/v1/alerts:
     get:
       summary: Consultar alertas persistidas
@@ -207,7 +278,10 @@ paths:
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleInput'}}}
-      responses: {'201': {description: Programación creada}, '400': {description: Invariante de saldo inválido}}
+      responses:
+        '201': {description: Programación creada}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
   /api/v1/schedules/{id}:
     patch:
       summary: Reprogramar una reserva
@@ -229,17 +303,83 @@ paths:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
       responses: {'200': {description: Programación completada}}
+  /api/v1/vacation-schedules:
+    get:
+      summary: Listar programaciones paginadas (alias compatible)
+      description: Alias de `/api/v1/schedules`; además de items devuelve data por compatibilidad.
+      parameters:
+        - {$ref: '#/components/parameters/Search'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: employmentId, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [SCHEDULED, CANCELLED, COMPLETED]}}
+        - {name: from, in: query, schema: {type: string, format: date}}
+        - {name: to, in: query, schema: {type: string, format: date}}
+      responses: {'200': {description: Colección paginada en items y data}}
+    post:
+      summary: Crear reserva de vacaciones (alias compatible)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleInput'}}}
+      responses:
+        '201': {description: Programación creada}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-schedules/{id}:
+    get:
+      summary: Obtener una programación por ID (ruta compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        '200': {description: Programación}
+        '404': {description: Programación no encontrada}
+  /api/v1/vacation-schedules/{id}/reschedule:
+    post:
+      summary: Reprogramar una reserva (acción compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleInput'}}}
+      responses:
+        '200': {description: Programación actualizada}
+        '409': {description: Conflicto de versión}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-schedules/{id}/cancel:
+    post:
+      summary: Cancelar una reserva (alias compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '200': {description: Programación cancelada}
+        '409': {description: Conflicto de versión}
+  /api/v1/vacation-schedules/{id}/register-settlement:
+    post:
+      summary: Convertir una reserva en liquidación (acción compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses:
+        '200': {description: Programación completada y liquidación creada}
+        '409': {description: Conflicto de versión}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
   /api/v1/settlements:
     get:
-      summary: Listar liquidaciones
-      parameters: [{name: employmentId, in: query, schema: {type: string}}]
-      responses: {'200': {description: Liquidaciones}}
+      summary: Listar liquidaciones paginadas
+      parameters:
+        - {$ref: '#/components/parameters/Search'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: employmentId, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [ACTIVE, ANULADA]}}
+        - {name: from, in: query, schema: {type: string, format: date}}
+        - {name: to, in: query, schema: {type: string, format: date}}
+      responses: {'200': {description: Colección paginada en items}}
     post:
       summary: Registrar vacaciones disfrutadas o compensadas
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
-      responses: {'201': {description: Liquidación creada}}
+      responses:
+        '201': {description: Liquidación creada}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
   /api/v1/settlements/{id}:
     patch:
       summary: Editar liquidación con control de versión
@@ -247,25 +387,320 @@ paths:
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
-      responses: {'200': {description: Liquidación actualizada}, '409': {description: Conflicto}}
+      responses:
+        '200': {description: Liquidación actualizada}
+        '409': {description: Conflicto de versión}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements:
+    get:
+      summary: Listar liquidaciones paginadas (alias compatible)
+      description: Alias de `/api/v1/settlements`; además de items devuelve data. Conserva filtros de empleo, búsqueda y estado.
+      parameters:
+        - {$ref: '#/components/parameters/Search'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: employmentId, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [ACTIVE, ANULADA]}}
+      responses: {'200': {description: Colección paginada en items y data}}
+    post:
+      summary: Crear liquidación (alias compatible)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses:
+        '201': {description: Liquidación creada}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements/{id}:
+    get:
+      summary: Obtener liquidación y líneas originales (ruta compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        '200': {description: Liquidación completa}
+        '404': {description: Liquidación no encontrada}
+    patch:
+      summary: Editar liquidación con control de versión (alias compatible)
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettlementInput'}}}
+      responses:
+        '200': {description: Liquidación actualizada}
+        '409': {description: Conflicto de versión}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements/{id}/annul:
+    post:
+      summary: Anular lógicamente una liquidación
+      parameters: [{$ref: '#/components/parameters/Id'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: {reason: {type: string, minLength: 3}}
+      responses:
+        '200': {description: Liquidación anulada}
+        '409': {description: Conflicto de versión}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements/import/preview:
+    post:
+      summary: Previsualizar importación CSV/XLSX de vacaciones disfrutadas
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportRequest'}}}
+      responses:
+        '200': {description: Lote PREVIEW, grupos, diferencias, conflictos y token}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements/import/{batchId}/apply:
+    post:
+      summary: Aplicar importación autorizada de vacaciones disfrutadas
+      description: "Registra las liquidaciones, crea los cronogramas COMPLETED correspondientes y ejecuta el barrido global de cierre con la fecha VACATION_CLOSURE_FROM_DATE: los períodos abiertos anteriores al corte que no estén protegidos por pendientes se cierran como 'Disfrutado (liquidación registrada)' cuando tienen liquidación o como 'Cerrado por migración' cuando no están contemplados. Las parcialidades quedan abiertas y se reportan en partiallyEnjoyedWarnings."
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportApplyRequest'}}}
+      responses:
+        '200':
+          description: Lote aplicado transaccionalmente con conteos del barrido (closedByMigration, closedEnjoyedPeriods, partiallyEnjoyedWarnings)
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-settlements/import/{batchId}:
+    get:
+      summary: Consultar lote de importación de vacaciones disfrutadas
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      responses:
+        '200': {description: Estado y trazabilidad del lote}
+        '404': {$ref: '#/components/responses/ImportNotFound'}
+  /api/v1/vacation-periods/import-pending/preview:
+    post:
+      summary: Previsualizar carga de períodos pendientes de disfrute
+      description: Por cada fila se identifica únicamente el contrato abierto (sin fecha de retiro). Se conservan protegidos los N períodos causados abiertos más recientes; los demás quedan RELEASED (abiertos sin saldo, a la espera de la carga de disfrutadas). Las filas que solo coinciden con contratos retirados generan advertencia y no se tocan.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportRequest'}}}
+      responses:
+        '200': {description: Lote PREVIEW con planes KEEP, RELEASED, PROTECTED, FORMING, ALREADY_CLOSED y REVIEW}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-periods/import-pending/{batchId}/apply:
+    post:
+      summary: Aplicar carga autorizada de períodos pendientes
+      description: Aplica conservaciones, liberaciones y protecciones. Los errores o períodos REVIEW bloquean la aplicación.
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportApplyRequest'}}}
+      responses:
+        '200': {description: Lote aplicado con conteos keptPeriods, releasedPeriods y protectedPeriods}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/vacation-periods/import-pending/{batchId}:
+    get:
+      summary: Consultar lote de períodos pendientes
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      responses:
+        '200': {description: Estado y trazabilidad del lote}
+        '404': {$ref: '#/components/responses/ImportNotFound'}
+  /api/v1/admin/vacation-period-closures/preview:
+    post:
+      summary: Previsualizar cierre masivo de períodos históricos
+      description: La fecha fromDate se envía en el cuerpo; si se omite se usa el ajuste VACATION_CLOSURE_FROM_DATE. La protección aplica únicamente a períodos con saldo pendiente de disfrute; los períodos sin saldo se cierran por migración.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportRequest'}}}
+      responses:
+        '200': {description: Lote PREVIEW con planes CLOSE, KEEP, PROTECTED, FUTURE, REVIEW y ALREADY_CLOSED}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/admin/vacation-period-closures/{batchId}/apply:
+    post:
+      summary: Aplicar cierre masivo autorizado
+      description: Cierra únicamente los períodos con decisión CLOSE y conserva intactos los REVIEW y PROTECTED. Los errores del lote bloquean la aplicación; la respuesta incluye closedPeriods y pendingReviewPeriods.
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FileImportApplyRequest'}}}
+      responses:
+        '200': {description: Cierre parcial aplicado con conteos}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+  /api/v1/admin/vacation-period-closures/{batchId}:
+    get:
+      summary: Consultar lote de cierre masivo
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      responses:
+        '200': {description: Estado y trazabilidad del lote}
+        '404': {$ref: '#/components/responses/ImportNotFound'}
+  /api/v1/worker-imports/template:
+    get:
+      summary: Descargar plantilla CSV para importar empleados
+      description: Requiere una sesión con permiso de lectura. Devuelve únicamente el encabezado esperado.
+      responses:
+        '200':
+          description: Plantilla CSV UTF-8
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+              example: attachment; filename="plantilla-empleados.csv"
+          content:
+            text/csv:
+              schema: {type: string}
+              example: "Cédula,Nombre,Fecha contrato,Fecha de retiro,Tipo de contrato,Proceso,Cargo,Supervisor\n"
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/worker-imports/preview:
+    post:
+      summary: Validar y previsualizar un CSV de empleados
+      description: Mapea encabezados y fechas, valida cada fila con las mismas reglas de la confirmación y calcula el hash de las filas válidas. Respeta MAX_UPLOAD_MB y MAX_IMPORT_ROWS, pero no crea un lote ni modifica datos. La propiedad data se conserva en esta ruta para compatibilidad.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EmploymentImportPreviewRequest'}
+      responses:
+        '200':
+          description: Encabezados, filas mapeadas, filas normalizadas válidas, errores por fila y hash del payload autorizable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportPreviewResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
   /api/v1/import/preview:
     post:
-      summary: Validar y previsualizar CSV
+      summary: Validar y previsualizar un CSV de empleados (alias)
+      description: Alias compatible de `/api/v1/worker-imports/preview`; ejecuta la misma validación y devuelve el mismo resultado sin la propiedad data.
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, required: [content], properties: {content: {type: string}}}}}
-      responses: {'200': {description: Filas válidas e inválidas}}
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EmploymentImportPreviewRequest'}
+      responses:
+        '200':
+          description: Encabezados, filas mapeadas, filas normalizadas válidas, errores por fila y hash del payload autorizable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportPreviewResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
   /api/v1/import/employments:
     post:
-      summary: Importación masiva idempotente de empleados
+      summary: Importación masiva idempotente y transaccional de empleados
+      description: Valida todas las filas, precarga relaciones por lote y confirma workers, vínculos, períodos, auditorías y estado final en una transacción. Las filas inválidas se reportan sin formar parte del plan confirmado.
       parameters:
-        - {name: Idempotency-Key, in: header, schema: {type: string}}
+        - name: Idempotency-Key
+          in: header
+          description: Clave opaca del lote lógico. Si se omite, se usa idempotencyKey del cuerpo o el hash del payload.
+          schema: {type: string}
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, required: [rows], properties: {rows: {type: array, maxItems: 5000, items: {$ref: '#/components/schemas/EmploymentInput'}}, idempotencyKey: {type: string}}}}}
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EmploymentImportRequest'}
       responses:
-        '201': {description: Importación completada}
-        '207': {description: Importación completada con filas inválidas}
+        '200':
+          description: Repetición idempotente; retorna el lote completado sin escribir de nuevo
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '201':
+          description: Importación nueva completada sin filas inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '207':
+          description: Importación nueva COMPLETED_WITH_ERRORS; confirmó filas válidas y devolvió inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+        '500': {$ref: '#/components/responses/ImportFailed'}
+  /api/v1/worker-imports/{batchId}:
+    get:
+      summary: Consultar un lote de empleados por ID o clave de idempotencia
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      responses:
+        '200':
+          description: Estado, conteos, errores seguros y métricas persistidas del lote
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportBatchResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/ImportNotFound'}
+  /api/v1/worker-imports/{batchId}/confirm:
+    post:
+      summary: Confirmar o recuperar de forma compatible un lote de empleados
+      description: Conserva la recuperación de lotes históricos PROCESSING o FAILED. El hash debe coincidir y cada adquisición incrementa attempt.
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EmploymentImportRetryRequest'}
+      responses:
+        '200':
+          description: El lote ya estaba completado; respuesta con replayed true
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '201':
+          description: Confirmación nueva completada sin filas inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '207':
+          description: Confirmación nueva completada con filas inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+        '500': {$ref: '#/components/responses/ImportFailed'}
+  /api/v1/worker-imports/{batchId}/retry:
+    post:
+      summary: Reintentar un lote de empleados FAILED con las mismas filas
+      description: Solo adquiere lotes FAILED. Un lote ya completado se devuelve como repetición idempotente y un contenido diferente responde 409.
+      parameters: [{$ref: '#/components/parameters/BatchId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EmploymentImportRetryRequest'}
+      responses:
+        '200':
+          description: El lote ya estaba completado; respuesta con replayed true
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '201':
+          description: Reintento completado sin filas inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '207':
+          description: Reintento completado con filas inválidas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmploymentImportResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/ImportNotFound'}
+        '409': {$ref: '#/components/responses/ImportConflict'}
+        '422': {$ref: '#/components/responses/BusinessRuleViolation'}
+        '500': {$ref: '#/components/responses/ImportFailed'}
   /api/v1/reports/balances:
     get:
       summary: Reporte de saldos
@@ -283,10 +718,12 @@ paths:
       responses: {'200': {description: Próximos a causar}}
   /api/v1/reports/schedules/annual:
     get:
-      summary: Descargar programación anual de vacaciones
-      description: Devuelve un PDF horizontal con empleados programados, fechas, días, períodos de origen, estado, resumen mensual y firmas de control. Por defecto solo incluye programaciones SCHEDULED que se cruzan con el año.
+      summary: Descargar programación de vacaciones en PDF o JSON
+      description: Devuelve un PDF horizontal con las programaciones que cruzan el rango de fechas solicitado (o todas las fechas si no se envían), más los filtros de búsqueda y estado. Incluye empleados, fechas, días, períodos de origen, estado, resumen mensual con etiquetas año-conscientes y firmas de control. El nombre del archivo refleja el rango (programacion-vacaciones-{desde}_a_{hasta}.pdf o programacion-vacaciones-completo.pdf).
       parameters:
-        - {name: year, in: query, schema: {type: integer, minimum: 2000, maximum: 2100}}
+        - {name: from, in: query, schema: {type: string, format: date}, description: Inicio del rango}
+        - {name: to, in: query, schema: {type: string, format: date}, description: Fin del rango}
+        - {name: year, in: query, schema: {type: integer, minimum: 2000, maximum: 2100}, description: "Compatibilidad: equivale a from=01-ene y to=31-dic de ese año"}
         - {name: status, in: query, schema: {type: string, enum: [SCHEDULED, CANCELLED, COMPLETED]}}
         - {$ref: '#/components/parameters/Search'}
         - {name: format, in: query, schema: {type: string, enum: [pdf, json], default: pdf}}
@@ -295,20 +732,219 @@ paths:
         '400': {description: Año o filtro inválido}
   /api/v1/audit:
     get:
-      summary: Consultar auditoría
+      summary: Consultar auditoría (lista completa, sin paginar)
+      deprecated: true
+      description: |
+        Mantenido por compatibilidad. Para tablas y listados administrativos
+        se debe usar `GET /api/v1/audit/page` que devuelve `PageDto<AuditEventDto>`.
       responses: {'200': {description: Eventos de auditoría}}
+  /api/v1/audit/page:
+    get:
+      summary: Auditoría paginada
+      parameters:
+        - in: query
+          name: page
+          schema: {type: integer, minimum: 1, default: 1}
+        - in: query
+          name: pageSize
+          schema: {type: integer, minimum: 1, maximum: 200, default: 20}
+        - in: query
+          name: actorId
+          schema: {type: string}
+        - in: query
+          name: action
+          schema: {type: string}
+        - in: query
+          name: entityType
+          schema: {type: string}
+        - in: query
+          name: entityId
+          schema: {type: string}
+        - in: query
+          name: fromDate
+          schema: {type: string, format: date}
+        - in: query
+          name: toDate
+          schema: {type: string, format: date}
+      responses:
+        '200':
+          description: Página de eventos de auditoría
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_AuditEvent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/admin/audit-events/page:
+    $ref: '#/paths/~1api~1v1~1audit~1page'
+  /api/v1/holidays/page:
+    get:
+      summary: Festivos paginados (vista autenticada)
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: year, schema: {type: integer, minimum: 2000, maximum: 2100}}
+        - {in: query, name: active, schema: {type: boolean}}
+        - {in: query, name: search, schema: {type: string}}
+      responses:
+        '200':
+          description: Página de festivos
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_Holiday'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/admin/holidays/page:
+    $ref: '#/paths/~1api~1v1~1holidays~1page'
+  /api/v1/admin/users/page:
+    get:
+      summary: Usuarios paginados
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: search, schema: {type: string}}
+        - {in: query, name: active, schema: {type: boolean}}
+        - in: query
+          name: role
+          schema:
+            type: string
+            enum: [ADMIN, HR, VIEWER, READ_ONLY]
+      responses:
+        '200':
+          description: Página de usuarios
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_UserSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/admin/catalogs/{type}/page:
+    get:
+      summary: Valores de catálogo paginados
+      parameters:
+        - {in: path, name: type, required: true, schema: {type: string}}
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: active, schema: {type: boolean}}
+        - {in: query, name: search, schema: {type: string}}
+      responses:
+        '200':
+          description: Página de catálogo
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_CatalogItem'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/alerts/page:
+    get:
+      summary: Alertas paginadas
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: employmentId, schema: {type: string}}
+        - {in: query, name: severity, schema: {type: string, enum: [INFO, WARNING, CRITICAL]}}
+        - {in: query, name: type, schema: {type: string, enum: [UPCOMING_ACCRUAL, OVERDUE_PERIOD, UPCOMING_VACATION, PENDING_AND_UPCOMING]}}
+        - {in: query, name: active, schema: {type: boolean}}
+      responses:
+        '200':
+          description: Página de alertas
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_VacationAlert'}
+  /api/v1/admin/scheduler-runs/page:
+    get:
+      summary: Ejecuciones del scheduler paginadas
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: jobName, schema: {type: string, enum: [VACATION_ACCRUAL]}}
+        - {in: query, name: status, schema: {type: string, enum: [RUNNING, COMPLETED, FAILED]}}
+        - {in: query, name: fromDate, schema: {type: string, format: date}}
+        - {in: query, name: toDate, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Página de ejecuciones
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_SchedulerRun'}
+  /api/v1/admin/import-batches/page:
+    get:
+      summary: Lotes de importación de empleados paginados
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - in: query
+          name: status
+          schema: {type: string, enum: [PROCESSING, COMPLETED, COMPLETED_WITH_ERRORS, FAILED]}
+        - {in: query, name: fileName, schema: {type: string}}
+        - {in: query, name: fromDate, schema: {type: string, format: date}}
+        - {in: query, name: toDate, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Página de lotes
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PageDto_ImportBatchSummary'}
+  /api/v1/admin/retired-employments/reconciliation/page:
+    get:
+      summary: Página de conciliación de empleados retirados
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {in: query, name: search, schema: {type: string}}
+        - in: query
+          name: state
+          schema: {type: string, enum: [ENJOYED, LIQUIDATED, PENDING_LIQUIDATION]}
+        - {in: query, name: asOf, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Página de conciliación
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RetiredReconciliationItemPage'}
 components:
   securitySchemes:
     cookieAuth:
       type: apiKey
       in: cookie
       name: vaca_access
+  responses:
+    Unauthorized:
+      description: Sesión ausente, inválida o expirada
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Forbidden:
+      description: La sesión no tiene el permiso requerido
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ValidationError:
+      description: Cuerpo, query o límite de entrada inválido
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ImportConflict:
+      description: La clave o el lote pertenecen a otro contenido, están en proceso o no admiten la acción
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    BusinessRuleViolation:
+      description: Una regla de negocio impide confirmar la operación
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ImportNotFound:
+      description: Lote de importación no encontrado
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ImportFailed:
+      description: La transacción no pudo completarse y el lote quedó FAILED
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
   parameters:
     Id: {name: id, in: path, required: true, schema: {type: string}}
     Search: {name: search, in: query, schema: {type: string}}
     Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
     PageSize: {name: pageSize, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
     IfMatch: {name: If-Match, in: header, schema: {type: integer, minimum: 1}}
+    BatchId: {name: batchId, in: path, required: true, schema: {type: string}}
   schemas:
     LoginRequest:
       type: object
@@ -362,6 +998,160 @@ components:
         processName: {type: string}
         positionName: {type: string}
         supervisorName: {type: string}
+    FileImportRequest:
+      type: object
+      required: [fileName]
+      anyOf:
+        - required: [content]
+        - required: [contentBase64]
+      properties:
+        fileName: {type: string, minLength: 1}
+        content: {type: string, description: Contenido CSV UTF-8}
+        contentBase64: {type: string, description: Bytes CSV/XLSX codificados en Base64}
+    FileImportApplyRequest:
+      type: object
+      required: [fileName, previewToken]
+      anyOf:
+        - required: [content]
+        - required: [contentBase64]
+      properties:
+        fileName: {type: string, minLength: 1}
+        content: {type: string, description: Contenido CSV UTF-8 idéntico al previsualizado}
+        contentBase64: {type: string, description: Bytes CSV/XLSX idénticos a los previsualizados}
+        previewToken: {type: string, minLength: 1}
+    EmploymentImportPreviewRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          description: CSV UTF-8 completo, incluido el encabezado
+    EmploymentImportRow:
+      type: object
+      description: Fila aún no validada. Puede usar nombres normalizados o encabezados admitidos por el importador; los errores se reportan por fila.
+      properties:
+        documentNumber: {type: string}
+        fullName: {type: string}
+        startDate: {type: string}
+        endDate: {type: string}
+        contractTypeName: {type: string}
+        processName: {type: string}
+        positionName: {type: string}
+        supervisorName: {type: string}
+      additionalProperties: true
+    EmploymentImportPreviewResponse:
+      type: object
+      required: [headers, rows, validatedRows, totalRows, validRows, invalidRows, errors, payloadHash]
+      properties:
+        data:
+          type: array
+          description: Copia compatible de rows, presente únicamente en `/worker-imports/preview`.
+          items: {$ref: '#/components/schemas/EmploymentImportRow'}
+        headers:
+          type: array
+          items: {type: string}
+        rows:
+          type: array
+          items: {$ref: '#/components/schemas/EmploymentImportRow'}
+        validatedRows:
+          type: array
+          description: Resultado por fila. Solo las entradas valid=true incluyen data normalizada y pueden enviarse a la confirmación.
+          items: {$ref: '#/components/schemas/EmploymentImportPreviewRow'}
+        totalRows: {type: integer, minimum: 0}
+        validRows: {type: integer, minimum: 0}
+        invalidRows: {type: integer, minimum: 0}
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/EmploymentImportError'}
+        payloadHash: {type: string, pattern: '^[a-f0-9]{64}$', description: SHA-256 de las filas válidas normalizadas}
+    EmploymentImportPreviewRow:
+      type: object
+      required: [row, valid, errors]
+      properties:
+        row: {type: integer, minimum: 2}
+        valid: {type: boolean}
+        data: {$ref: '#/components/schemas/EmploymentImportRow'}
+        errors: {type: array, items: {type: string}}
+    EmploymentImportRequest:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          description: El máximo predeterminado es 5000 y se configura con MAX_IMPORT_ROWS.
+          items: {$ref: '#/components/schemas/EmploymentImportRow'}
+        idempotencyKey: {type: string, minLength: 8}
+    EmploymentImportRetryRequest:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          description: Deben producir exactamente el mismo hash del payload original.
+          items: {$ref: '#/components/schemas/EmploymentImportRow'}
+    EmploymentImportError:
+      type: object
+      required: [row, message]
+      properties:
+        row: {type: integer, minimum: 0, description: Cero identifica un error general de persistencia}
+        message: {type: string}
+    EmploymentImportMetrics:
+      type: object
+      required: [durationMs, processedRows, databaseOperations, chunks]
+      description: DTO de métricas seguras del intento; no contiene datos de las filas.
+      properties:
+        durationMs: {type: integer, minimum: 0, description: Duración total del intento en milisegundos}
+        processedRows: {type: integer, minimum: 0, description: Filas recibidas por el intento}
+        databaseOperations: {type: integer, minimum: 0, description: Documentos lógicos incluidos en el plan transaccional}
+        chunks: {type: integer, minimum: 0, description: Comandos bulkWrite de máximo 500 operaciones}
+    EmploymentImportBatch:
+      type: object
+      required: [id, idempotencyKey, entityType, status, totalRows, createdRows, updatedRows, invalidRows, errorSummary, createdAt]
+      properties:
+        id: {type: string}
+        idempotencyKey: {type: string}
+        payloadHash: {type: string, description: SHA-256 usado para detectar cambios de contenido}
+        entityType: {type: string, enum: [EMPLOYMENT]}
+        status: {type: string, enum: [PROCESSING, COMPLETED, COMPLETED_WITH_ERRORS, FAILED]}
+        attempt: {type: integer, minimum: 1, description: Adquisición lógica actual del lote}
+        persistenceAttempts: {type: integer, minimum: 1, maximum: 3, description: Intentos Mongo del intento completado}
+        totalRows: {type: integer, minimum: 0}
+        createdRows: {type: integer, minimum: 0}
+        updatedRows: {type: integer, minimum: 0}
+        invalidRows: {type: integer, minimum: 0}
+        duplicateRows: {type: integer, minimum: 0}
+        processedRows: {type: integer, minimum: 0}
+        durationMs: {type: integer, minimum: 0}
+        databaseOperations: {type: integer, minimum: 0}
+        chunks: {type: integer, minimum: 0}
+        errorSummary: {type: array, items: {$ref: '#/components/schemas/EmploymentImportError'}}
+        createdAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+        failedAt: {type: string, format: date-time}
+    EmploymentImportBatchResponse:
+      allOf:
+        - {$ref: '#/components/schemas/EmploymentImportBatch'}
+        - type: object
+          required: [data]
+          properties:
+            data: {$ref: '#/components/schemas/EmploymentImportBatch'}
+    EmploymentImportResponse:
+      type: object
+      required: [batch, created, updated, invalidRows, errors, metrics]
+      properties:
+        replayed: {type: boolean}
+        batch: {$ref: '#/components/schemas/EmploymentImportBatch'}
+        data: {$ref: '#/components/schemas/EmploymentImportBatch'}
+        created: {type: integer, minimum: 0}
+        updated: {type: integer, minimum: 0}
+        invalidRows: {type: integer, minimum: 0}
+        errors: {type: array, items: {$ref: '#/components/schemas/EmploymentImportError'}}
+        metrics: {$ref: '#/components/schemas/EmploymentImportMetrics'}
     ScheduleInput:
       type: object
       required: [employmentId, startDate, scheduledDays, allocations]
@@ -383,3 +1173,232 @@ components:
         amountCOP: {type: number, minimum: 0}
         accountingDocument: {type: string}
         allocations: {type: array, items: {type: object}}
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, BUSINESS_RULE_VIOLATION, INTERNAL_ERROR]
+        message: {type: string}
+        requestId: {type: string, description: Correlación de la petición; puede faltar en respuestas de compatibilidad directas}
+        details:
+          type: object
+          additionalProperties: true
+    Holiday:
+      type: object
+      required: [id, date, name, country, active, createdAt, updatedAt]
+      properties:
+        id: {type: string}
+        date: {type: string, format: date}
+        name: {type: string}
+        country: {type: string}
+        active: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    UserSummary:
+      type: object
+      required: [id, username, displayName, jobTitle, role, active]
+      properties:
+        id: {type: string}
+        username: {type: string}
+        displayName: {type: string}
+        jobTitle: {type: string}
+        role: {type: string, enum: [ADMIN, HR, VIEWER, READ_ONLY]}
+        active: {type: boolean}
+    CatalogItem:
+      type: object
+      required: [id, type, name, active, createdAt, updatedAt]
+      properties:
+        id: {type: string}
+        type: {type: string}
+        name: {type: string}
+        active: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    VacationAlert:
+      type: object
+      required: [id, employmentId, type, severity, asOf, message, active, createdAt, updatedAt]
+      properties:
+        id: {type: string}
+        employmentId: {type: string}
+        type: {type: string, enum: [UPCOMING_ACCRUAL, OVERDUE_PERIOD, UPCOMING_VACATION, PENDING_AND_UPCOMING]}
+        severity: {type: string, enum: [INFO, WARNING, CRITICAL]}
+        asOf: {type: string, format: date}
+        dueDate: {type: string, format: date}
+        message: {type: string}
+        active: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    SchedulerRun:
+      type: object
+      required: [id, jobName, asOf, status, processedEmployments, generatedPeriods, generatedAlerts, startedAt]
+      properties:
+        id: {type: string}
+        jobName: {type: string, enum: [VACATION_ACCRUAL]}
+        asOf: {type: string, format: date}
+        status: {type: string, enum: [RUNNING, COMPLETED, FAILED]}
+        processedEmployments: {type: integer, minimum: 0}
+        generatedPeriods: {type: integer, minimum: 0}
+        generatedAlerts: {type: integer, minimum: 0}
+        startedAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time}
+        errorMessage: {type: string}
+    RetiredVacationPeriod:
+      type: object
+      required: [periodId, periodStartDate, periodEndDate, lifecycleStatus, pendingDays, enjoyedDays, compensatedDays, state]
+      properties:
+        periodId: {type: string}
+        periodStartDate: {type: string, format: date}
+        periodEndDate: {type: string, format: date}
+        lifecycleStatus: {type: string, enum: [FORMING, CAUSED, CLOSED]}
+        closureType: {type: string, enum: [RETIREMENT, ACCOUNTING_LIQUIDATION, MASS_MIGRATION, MANUAL]}
+        closureObservation: {type: string}
+        closureAccountingDocument: {type: string}
+        pendingDays: {type: number, minimum: 0}
+        enjoyedDays: {type: number, minimum: 0}
+        compensatedDays: {type: number, minimum: 0}
+        state: {type: string, enum: [ENJOYED, LIQUIDATED, PENDING_LIQUIDATION]}
+    RetiredReconciliationItem:
+      type: object
+      required: [employmentId, workerId, employeeName, documentNumber, pendingPeriods, enjoyedPeriods, liquidatedPeriods, closedPeriods, periods]
+      properties:
+        employmentId: {type: string}
+        workerId: {type: string}
+        employeeName: {type: string}
+        documentNumber: {type: string}
+        endDate: {type: string, format: date}
+        pendingPeriods: {type: integer, minimum: 0}
+        enjoyedPeriods: {type: integer, minimum: 0}
+        liquidatedPeriods: {type: integer, minimum: 0}
+        closedPeriods: {type: integer, minimum: 0}
+        periods: {type: array, items: {$ref: '#/components/schemas/RetiredVacationPeriod'}}
+    PageDto:
+      type: object
+      required: [items, page, pageSize, total, hasNext]
+      properties:
+        items: {type: array, items: {}}
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+        hasNext: {type: boolean}
+    DashboardDetailPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          required: [asOf, kind]
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/EmploymentSummary'}}
+            asOf: {type: string, format: date}
+            kind: {type: string, enum: [ACTIVE, PENDING_PERIODS, PENDING_DAYS, COVERAGE, PENDING_EMPLOYEES, SCHEDULED, OVERDUE, ENJOYED, COMPENSATED, UPCOMING, PRIORITY, HEALTH, PROCESS]}
+            healthStatus: {type: string, enum: [UP_TO_DATE, PROGRAMMED, PARTIAL, PENDING, OVERDUE]}
+            processName: {type: string}
+    EmploymentSummary:
+      type: object
+      required: [id, workerId, fullName, documentNumber, processName, positionName, startDate, contractTypeName, status, causedPeriods, pendingPeriods, generatedDays, enjoyedDays, compensatedDays, pendingDays, scheduledDays, availableForScheduling, nextAccrualDate, formingStartDate, formingEndDate, daysUntilAccrual, accrualProgressPercent, overduePeriods, vacationStatus, alert]
+      properties:
+        id: {type: string}
+        workerId: {type: string}
+        fullName: {type: string}
+        documentNumber: {type: string}
+        processName: {type: string}
+        positionName: {type: string}
+        supervisorName: {type: string}
+        startDate: {type: string, format: date}
+        endDate: {type: string, format: date}
+        contractTypeName: {type: string}
+        status: {type: string, enum: [ACTIVE, RETIRED]}
+        causedPeriods: {type: integer, minimum: 0}
+        pendingPeriods: {type: integer, minimum: 0}
+        generatedDays: {type: number, minimum: 0}
+        enjoyedDays: {type: number, minimum: 0}
+        compensatedDays: {type: number, minimum: 0}
+        pendingDays: {type: number, minimum: 0}
+        scheduledDays: {type: number, minimum: 0}
+        availableForScheduling: {type: number, minimum: 0}
+        nextAccrualDate: {type: string, format: date}
+        formingStartDate: {type: string, format: date}
+        formingEndDate: {type: string, format: date}
+        daysUntilAccrual: {type: integer}
+        accrualProgressPercent: {type: integer, minimum: 0, maximum: 100}
+        overduePeriods: {type: integer, minimum: 0}
+        vacationStatus: {type: string, enum: [PENDING, SCHEDULED, OVERDUE, CLEAR]}
+        alert: {type: string, enum: [NORMAL, INFORMATIVE, UPCOMING, DUE_SOON, CAUSED_TODAY]}
+    PageDto_AuditEvent:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+    PageDto_Holiday:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/Holiday'}}
+    PageDto_UserSummary:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/UserSummary'}}
+    PageDto_CatalogItem:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/CatalogItem'}}
+    PageDto_VacationAlert:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/VacationAlert'}}
+    PageDto_SchedulerRun:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/SchedulerRun'}}
+    PageDto_ImportBatchSummary:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/ImportBatchSummary'}}
+    RetiredReconciliationItemPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageDto'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/RetiredReconciliationItem'}}
+    AuditEvent:
+      type: object
+      required: [id, actorId, action, entityType, entityId, createdAt]
+      properties:
+        id: {type: string}
+        actorId: {type: string}
+        action: {type: string}
+        entityType: {type: string}
+        entityId: {type: string}
+        metadata: {type: object, additionalProperties: true}
+        createdAt: {type: string, format: date-time}
+    ImportBatchSummary:
+      type: object
+      required: [id, status, totalRows, createdRows, updatedRows, invalidRows, createdAt]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [PROCESSING, COMPLETED, COMPLETED_WITH_ERRORS, FAILED]}
+        attempt: {type: integer, minimum: 0}
+        totalRows: {type: integer, minimum: 0}
+        createdRows: {type: integer, minimum: 0}
+        updatedRows: {type: integer, minimum: 0}
+        invalidRows: {type: integer, minimum: 0}
+        durationMs: {type: integer, minimum: 0}
+        processedRows: {type: integer, minimum: 0}
+        databaseOperations: {type: integer, minimum: 0}
+        chunks: {type: integer, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+        failedAt: {type: string, format: date-time}
+      description: Metadatos seguros opcionales; nunca incluye cookies, tokens, credenciales ni cadenas de conexión.

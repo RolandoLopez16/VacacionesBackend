@@ -20,10 +20,9 @@ import type { SchedulerRun } from "../../domain/vacations/schedulerRun.js";
 export interface WorkerRepository {
   listWorkers(): Promise<Worker[]>;
   listWorkersByIds(ids: string[]): Promise<Worker[]>;
+  findWorkersByNormalizedDocuments(normalizedDocumentNumbers: string[]): Promise<Worker[]>;
   findWorkerById(id: string): Promise<Worker | null>;
-  findWorkerByNormalizedDocument(
-    normalizedDocumentNumber: string,
-  ): Promise<Worker | null>;
+  findWorkerByNormalizedDocument(normalizedDocumentNumber: string): Promise<Worker | null>;
   saveWorker(worker: Worker): Promise<void>;
 }
 export interface EmploymentPageQuery {
@@ -42,6 +41,7 @@ export interface EmploymentPage {
 export interface EmploymentRepository {
   listEmployments(): Promise<Employment[]>;
   findEmploymentsByIds(ids: string[]): Promise<Employment[]>;
+  findEmploymentsByWorkerIds(workerIds: string[]): Promise<Employment[]>;
   listEmploymentsByFilter(
     query: Omit<EmploymentPageQuery, "page" | "pageSize" | "search">,
   ): Promise<Employment[]>;
@@ -62,9 +62,7 @@ export interface PeriodRepository {
 export interface ScheduleRepository {
   listSchedules(): Promise<VacationSchedule[]>;
   listSchedulePage(query: SchedulePageQuery): Promise<SchedulePage>;
-  listAnnualScheduleReport(
-    query: AnnualScheduleReportQuery,
-  ): Promise<ScheduleReportItem[]>;
+  listAnnualScheduleReport(query: AnnualScheduleReportQuery): Promise<ScheduleReportItem[]>;
   findSchedulesByEmploymentIds(ids: string[]): Promise<VacationSchedule[]>;
   findSchedulesByIds(ids: string[]): Promise<VacationSchedule[]>;
   findScheduleById(id: string): Promise<VacationSchedule | null>;
@@ -84,7 +82,9 @@ export interface SchedulePage {
   total: number;
 }
 export interface AnnualScheduleReportQuery {
-  year: number;
+  year?: number | undefined;
+  fromDate?: LocalDate | undefined;
+  toDate?: LocalDate | undefined;
   status?: VacationSchedule["status"] | undefined;
   search?: string | undefined;
 }
@@ -113,41 +113,71 @@ export interface SettlementRepository {
   listSettlementPage(query: SettlementPageQuery): Promise<SettlementPage>;
   findSettlementsByEmploymentIds(ids: string[]): Promise<VacationSettlement[]>;
   findSettlementById(id: string): Promise<VacationSettlement | null>;
-  findSettlementBySourceKey(
-    sourceKey: string,
-  ): Promise<VacationSettlement | null>;
+  findSettlementBySourceKey(sourceKey: string): Promise<VacationSettlement | null>;
   saveSettlement(settlement: VacationSettlement): Promise<void>;
 }
 export interface PolicyRepository {
   current(asOf: LocalDate): Promise<VacationPolicy>;
   savePolicy(policy: VacationPolicy): Promise<void>;
 }
+export interface AuditEvent {
+  id: string;
+  actorId: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: unknown;
+  createdAt: string;
+}
+export interface AuditPageQuery {
+  page: number;
+  pageSize: number;
+  actorId?: string | undefined;
+  action?: string | undefined;
+  entityType?: string | undefined;
+  entityId?: string | undefined;
+  fromDate?: LocalDate | undefined;
+  toDate?: LocalDate | undefined;
+}
+export interface PagedAudits {
+  items: AuditEvent[];
+  total: number;
+}
 export interface AuditRepository {
-  append(event: {
-    id: string;
-    actorId: string;
-    action: string;
-    entityType: string;
-    entityId: string;
-    metadata: unknown;
-    createdAt: string;
-  }): Promise<void>;
-  listAudits(): Promise<unknown[]>;
+  append(event: AuditEvent): Promise<void>;
+  listAudits(): Promise<AuditEvent[]>;
+  listAuditsPage(query: AuditPageQuery): Promise<PagedAudits>;
+}
+export interface ImportBatchPageQuery {
+  page: number;
+  pageSize: number;
+  actorId?: string | undefined;
+  status?: ImportBatch["status"] | undefined;
+  fileName?: string | undefined;
+  fromDate?: string | undefined;
+  toDate?: string | undefined;
+}
+export interface PagedImportBatches {
+  items: ImportBatch[];
+  total: number;
 }
 export interface ImportBatchRepository {
   findImportBatchByIdempotencyKey(key: string): Promise<ImportBatch | null>;
+  findImportBatchById(id: string): Promise<ImportBatch | null>;
+  claimImportBatch(
+    batch: ImportBatch,
+    expected?: { status: ImportBatch["status"]; attempt: number },
+  ): Promise<boolean>;
+  markImportBatchFailed(batch: ImportBatch, expectedAttempt: number): Promise<boolean>;
   saveImportBatch(batch: ImportBatch): Promise<void>;
+  listImportBatchesPage(query: ImportBatchPageQuery): Promise<PagedImportBatches>;
 }
 export interface VacationSettlementImportRepository {
-  findVacationSettlementImportBatch(
-    id: string,
-  ): Promise<VacationSettlementImportBatch | null>;
+  findVacationSettlementImportBatch(id: string): Promise<VacationSettlementImportBatch | null>;
   findVacationSettlementImportByFileHash(
     hash: string,
   ): Promise<VacationSettlementImportBatch | null>;
-  saveVacationSettlementImportBatch(
-    batch: VacationSettlementImportBatch,
-  ): Promise<void>;
+  saveVacationSettlementImportBatch(batch: VacationSettlementImportBatch): Promise<void>;
 }
 export interface VacationPeriodClosureRepository {
   findVacationPeriodClosureBatch(id: string): Promise<VacationPeriodClosureBatch | null>;
@@ -161,40 +191,101 @@ export interface VacationPendingPeriodImportRepository {
   findVacationPendingPeriodImportByFileHash(
     fileHash: string,
   ): Promise<VacationPendingPeriodImportBatch | null>;
-  saveVacationPendingPeriodImportBatch(
-    batch: VacationPendingPeriodImportBatch,
-  ): Promise<void>;
+  saveVacationPendingPeriodImportBatch(batch: VacationPendingPeriodImportBatch): Promise<void>;
 }
 export interface SessionRepository {
   findSessionById(id: string): Promise<Session | null>;
   saveSession(session: Session): Promise<void>;
   revokeSession(id: string, revokedAt: string): Promise<void>;
 }
+export interface CatalogPageQuery {
+  page: number;
+  pageSize: number;
+  type: string;
+  active?: boolean | undefined;
+  search?: string | undefined;
+}
+export interface PagedCatalog {
+  items: CatalogItem[];
+  total: number;
+}
 export interface CatalogRepository {
   listCatalog(type: string): Promise<CatalogItem[]>;
   saveCatalog(item: CatalogItem): Promise<void>;
+  listCatalogPage(query: CatalogPageQuery): Promise<PagedCatalog>;
 }
 export interface SystemSettingRepository {
   findSystemSettingByKey(key: string): Promise<SystemSetting | null>;
   saveSystemSetting(setting: SystemSetting): Promise<void>;
 }
+export interface HolidayPageQuery {
+  page: number;
+  pageSize: number;
+  year?: number | undefined;
+  active?: boolean | undefined;
+  search?: string | undefined;
+}
+export interface PagedHolidays {
+  items: Holiday[];
+  total: number;
+}
 export interface HolidayRepository {
   listHolidays(year?: number): Promise<Holiday[]>;
   saveHoliday(holiday: Holiday): Promise<void>;
+  listHolidaysPage(query: HolidayPageQuery): Promise<PagedHolidays>;
+}
+export interface AlertPageQuery {
+  page: number;
+  pageSize: number;
+  employmentId?: string | undefined;
+  severity?: VacationAlert["severity"] | undefined;
+  type?: VacationAlert["type"] | undefined;
+  active?: boolean | undefined;
+}
+export interface PagedAlerts {
+  items: VacationAlert[];
+  total: number;
 }
 export interface AlertRepository {
-  listAlerts(filters?: {
-    employmentId?: string;
-    active?: boolean;
-  }): Promise<VacationAlert[]>;
+  listAlerts(filters?: { employmentId?: string; active?: boolean }): Promise<VacationAlert[]>;
   saveAlert(alert: VacationAlert): Promise<void>;
+  listAlertsPage(query: AlertPageQuery): Promise<PagedAlerts>;
+}
+export interface SchedulerRunPageQuery {
+  page: number;
+  pageSize: number;
+  jobName?: SchedulerRun["jobName"] | undefined;
+  status?: SchedulerRun["status"] | undefined;
+  fromDate?: LocalDate | undefined;
+  toDate?: LocalDate | undefined;
+}
+export interface PagedSchedulerRuns {
+  items: SchedulerRun[];
+  total: number;
 }
 export interface SchedulerRunRepository {
   listSchedulerRuns(): Promise<SchedulerRun[]>;
   findSchedulerRunById(id: string): Promise<SchedulerRun | null>;
   saveSchedulerRun(run: SchedulerRun): Promise<void>;
+  listSchedulerRunsPage(query: SchedulerRunPageQuery): Promise<PagedSchedulerRuns>;
 }
 export interface TransactionRepository {
+  applyEmploymentImport(
+    batch: ImportBatch,
+    workers: Worker[],
+    employments: Employment[],
+    periods: VacationPeriod[],
+    audits: {
+      id: string;
+      actorId: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      metadata: unknown;
+      createdAt: string;
+    }[],
+    startedAtMs: number,
+  ): Promise<ImportBatch>;
   saveScheduleAndAudit(
     schedule: VacationSchedule,
     audit: {
@@ -300,10 +391,22 @@ export interface TransactionRepository {
     },
   ): Promise<void>;
 }
+export interface UserPageQuery {
+  page: number;
+  pageSize: number;
+  search?: string | undefined;
+  active?: boolean | undefined;
+  role?: User["role"] | undefined;
+}
+export interface PagedUsers {
+  items: User[];
+  total: number;
+}
 export interface UserRepository {
   listUsers(): Promise<User[]>;
   findUserByUsername(username: string): Promise<User | null>;
   saveUser(user: User): Promise<void>;
+  listUsersPage(query: UserPageQuery): Promise<PagedUsers>;
 }
 export interface VacationStore
   extends

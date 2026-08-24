@@ -1,66 +1,128 @@
 # Sistema Web Vaca EFA
 
-Sistema empresarial para controlar empleados, vínculos, períodos causados, períodos en formación, saldos, programación, liquidaciones y auditoría de vacaciones.
+Sistema empresarial para gestionar empleados, vínculos laborales históricos, causación, saldos, programación, liquidaciones, importaciones, alertas y auditoría de vacaciones.
 
-## Estado de esta entrega
+## Capacidades
 
-La aplicación ya incluye una base ejecutable de monorepo con:
+- causación idempotente, período en formación y saldos derivados de períodos, liquidaciones y reservas;
+- empleados con cédula, nombre, fechas de contrato y retiro, tipo de contrato, proceso, cargo y supervisor;
+- cronogramas y liquidaciones con asignación por período, control de versión y transacciones compuestas;
+- importaciones de empleados, períodos pendientes, vacaciones disfrutadas y cierres administrativos;
+- importación de empleados idempotente, transaccional, recuperable y con estados y métricas persistidos;
+- autenticación JWT en cookies HttpOnly, rotación de sesiones y permisos `ADMIN`, `HR`, `VIEWER` y `READ_ONLY`;
+- scheduler idempotente, alertas, festivos, catálogos, usuarios y política administrable;
+- reportes JSON, CSV, XLSX y PDF; XLSX usa `exceljs`, PDF usa `pdfkit` y las celdas exportadas se protegen contra inyección de fórmulas;
+- SPA React responsive con navegación móvil, listados paginados, búsqueda remota, detalle de indicadores del dashboard, estados de carga/error/vacío y pruebas Vitest + Testing Library.
 
-- dominio de vacaciones independiente de Express, React y MongoDB;
-- causación automática idempotente y días faltantes derivados;
-- saldos legales y disponibles para programación derivados de movimientos;
-- API REST `/api/v1` con login, empleados y vínculos históricos, dashboard, períodos, programación completa, liquidaciones editables, importación masiva idempotente, reportes CSV y auditoría;
-- SPA React responsive con dashboard, empleados, detalle, períodos, cronograma y alertas;
-- persistencia MongoDB Atlas sobre la base dedicada `efagram_vacaciones` y repositorio en memoria para pruebas;
-- autenticación JWT con access/refresh token en cookies HttpOnly, usuario administrador persistido y hash de contraseña con scrypt;
-- empleados con cédula, nombre, fecha de contrato, fecha de retiro, tipo de contrato, proceso, cargo y supervisor;
-- alta individual, exportación CSV y carga masiva CSV con vista previa y confirmación;
-- pruebas unitarias de fechas, causación, saldos, reservas, reingresos, idempotencia y concurrencia optimista;
-- sesiones rotatorias persistidas en Mongo, revocación de refresh tokens, permisos ADMIN/HR/VIEWER, scheduler idempotente, festivos y catálogos administrables;
-- pantalla de Configuración activa para consultar y administrar política de vacaciones, catálogos, festivos, usuarios, alertas y ejecuciones del scheduler;
-- reportes en CSV, XLSX y PDF con protección contra inyección de fórmulas;
-- cierre automático del ciclo de vacaciones al retiro, regularización histórica por lotes transaccionales y exclusión de períodos cerrados del saldo pendiente;
-- documentación de cobertura de requisitos en `docs/requirements-coverage.md` y contrato OpenAPI en `docs/openapi.yaml`.
+## Estructura
+
+```text
+apps/api/
+  src/domain/                         Reglas puras, LocalDate y errores tipados
+  src/application/ports/              Puertos pequeños, compuestos por VacationStore
+  src/application/services/vacation/  Servicios por capacidad
+  src/application/services/vacationService.ts
+                                      Facade de compatibilidad para los casos de uso
+  src/adapters/outbound/memory/        Repositorios y transacciones para pruebas
+  src/adapters/outbound/mongodb/       Repositorios Mongo, índices y transacciones
+  src/bootstrap/routes/                Routers Express por capacidad
+  src/bootstrap/schemas/               Validación Zod de HTTP
+  src/bootstrap/middleware/            Sesión, autorización, request-id y errores
+  src/infrastructure/                  Configuración, importación, reportes y reset
+apps/web/
+  src/components/                      Vistas y componentes por capacidad
+  src/components/ui/                   Controles compartidos
+  src/hooks/                           Paginación y búsqueda diferida
+  tests/                               Pruebas jsdom de cliente, hooks y componentes
+packages/contracts/                    DTO TypeScript compartidos por API y SPA
+```
+
+El flujo principal es `router -> VacationService -> servicio de capacidad -> puerto -> repositorio`. `VacationService` conserva una API estable mientras delega en servicios de empleos, causación, cronogramas, liquidaciones, retiros, reportes e importaciones. `MemoryStore` y `MongoStore` también son facades: componen los puertos de `VacationStore` y delegan en repositorios separados por capacidad.
+
+Los errores esperados de dominio y aplicación son subtipos de `DomainError`. El middleware central los traduce a un estado HTTP y un cuerpo con `code`, `message`, `requestId` y, cuando corresponde, `details`; los routers no interpretan mensajes para decidir el estado.
+
+## Compatibilidad HTTP
+
+Se conserva el prefijo `/api/v1` y los aliases existentes:
+
+| Capacidad | Ruta principal | Alias compatible |
+| --- | --- | --- |
+| Cronogramas | `/api/v1/schedules` | `/api/v1/vacation-schedules` |
+| Liquidaciones | `/api/v1/settlements` | `/api/v1/vacation-settlements` |
+| Vista previa de empleados | `/api/v1/worker-imports/preview` | `/api/v1/import/preview` |
+
+El detalle de estas rutas, incluidas las acciones históricas propias de cada alias, está en `docs/openapi.yaml`.
 
 ## Requisitos
 
-Node.js 24 LTS, npm 11 y acceso al clúster MongoDB Atlas configurado en `.env`.
+- Node.js 24 LTS.
+- npm 11.
+- MongoDB Atlas o MongoDB con replica set para `STORAGE_MODE=mongo`.
+- Variables locales definidas a partir de `.env.example`; no se deben versionar credenciales ni tokens.
 
-## Inicio rápido
+La base lógica debe permanecer en `efagram_vacaciones`, separada de `efagram_nomina`.
+
+## Inicio local
 
 ```bash
 npm install
+npm run build
 npm run dev
 ```
 
-Abrir `http://localhost:5173`. El acceso inicial utiliza el usuario y la contraseña definidos por `BOOTSTRAP_ADMIN_USERNAME` y `BOOTSTRAP_ADMIN_PASSWORD` en el entorno; nunca se muestran ni se almacenan en el código fuente.
+- SPA: `http://localhost:5173`.
+- API: `http://localhost:3000`.
+- Proxy Vite: `/api` hacia `http://localhost:3000`.
+- Health: `/api/v1/health`, `/api/v1/health/live` y `/api/v1/health/ready`.
 
-La configuración actual usa la base nueva `efagram_vacaciones`, separada de `efagram_nomina`. El administrador bootstrap debe cambiar su contraseña después del primer acceso.
+El script `dev` del API ejecuta `apps/api/dist/src/bootstrap/server.js`; por eso se debe compilar antes del primer arranque y después de cambios backend. Para compilar y arrancar solo el API en una operación:
 
-Para limpiar exclusivamente las colecciones de vacaciones y recrear el administrador:
+```bash
+npm run build:dev --workspace @vaca-efa/api
+```
+
+El acceso inicial usa `BOOTSTRAP_ADMIN_USERNAME` y `BOOTSTRAP_ADMIN_PASSWORD` del entorno. La contraseña bootstrap debe cambiarse antes de producción.
+
+## Importación de empleados
+
+1. Descargar la plantilla con `GET /api/v1/worker-imports/template`.
+2. Previsualizar y validar cada fila del CSV con `POST /api/v1/worker-imports/preview`.
+3. Confirmar las filas con `POST /api/v1/import/employments` y un `Idempotency-Key` estable para ese contenido.
+4. Consultar el estado con `GET /api/v1/worker-imports/:batchId`.
+5. Reintentar un lote `FAILED`, con exactamente las mismas filas, mediante `POST /api/v1/worker-imports/:batchId/retry`.
+
+La vista previa devuelve `validatedRows`, errores por fila y `payloadHash`; no modifica datos. La interfaz confirma únicamente las filas normalizadas marcadas como válidas y exige autorización explícita. Una confirmación nueva responde `201` si todas las filas son válidas o `207` si confirmó las válidas y reportó inválidas. Una repetición ya completada responde `200`; conflictos de contenido o estado responden `409`. El resultado incluye `metrics.durationMs`, `metrics.processedRows`, `metrics.databaseOperations` y `metrics.chunks`. El endpoint `confirm` se mantiene para recuperación compatible de lotes antiguos en `PROCESSING` o `FAILED`.
+
+La plantilla usa `Cédula,Nombre,Fecha contrato,Fecha de retiro,Tipo de contrato,Proceso,Cargo,Supervisor`. La fecha de retiro puede estar vacía y las fechas de negocio se mantienen como `YYYY-MM-DD`. Al importar, por cada cédula queda un solo contrato activo: los contratos anteriores sin fecha de retiro quedan retirados con `endDate` el día anterior al inicio del contrato siguiente y sus períodos se cierran.
+
+## Cierre histórico de períodos
+
+El flujo canónico es empleados → períodos pendientes → disfrutadas → cierre masivo, y se describe completo en `docs/operations.md`. La fecha de corte vive en el ajuste `VACATION_CLOSURE_FROM_DATE` (`GET/PATCH /api/v1/admin/settings/VACATION_CLOSURE_FROM_DATE`, por defecto `2025-01-01`): la carga de disfrutadas cierra en toda la base los períodos anteriores al corte que no estén protegidos por pendientes (como disfrutado o como migración), y el cierre masivo aplica solo las decisiones seguras dejando las revisiones intactas.
+
+## Validación
+
+Desde la raíz, el mismo alcance usado por CI es:
+
+```bash
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run build
+```
+
+`npm test` ejecuta primero las pruebas del API y luego las de la SPA. La evidencia por requisito está en `docs/requirements-coverage.md`.
+
+## Docker y reset
+
+```bash
+docker compose up --build
+```
+
+Docker inicia MongoDB con `--replSet rs0`, ejecuta `rs.initiate(...)` y levanta API y frontend. Para limpiar únicamente las colecciones del sistema de vacaciones y recrear el administrador:
 
 ```bash
 npm run db:reset --workspace @vaca-efa/api
 ```
 
-El reset no usa `dropDatabase` porque el usuario de Atlas no tiene permisos administrativos; borra solamente las colecciones del sistema de vacaciones.
-
-## Validación
-
-```bash
-npm run typecheck
-npm test
-npm run build
-```
-
-Los health checks públicos son `/api/v1/health`, `/api/v1/health/live` y `/api/v1/health/ready`. Las operaciones que modifican datos generan eventos en `auditEvents`; las ediciones admiten `If-Match` con el número de versión para evitar sobrescrituras concurrentes.
-
-La política inicial utiliza 15 días por año causado, alerta en 30/60/90 días y atraso administrativo 12 meses después de la causación. Las fechas empresariales se tratan como `YYYY-MM-DD`, sin instantes horarios.
-
-Después de cargar y validar los disfrutes históricos, los contratos retirados pueden regularizarse con sesión ADMIN mediante `POST /api/v1/admin/retired-employments/close-pending`. La operación es idempotente, no elimina información y deja el cierre en el historial.
-
-El CSV de carga masiva debe tener estas columnas: `Cédula,Nombre,Fecha contrato,Fecha de retiro,Tipo de contrato,Proceso,Cargo,Supervisor`. La fecha de retiro puede quedar vacía.
-
-## Arquitectura
-
-`apps/api/src/domain` contiene las reglas puras. `application` orquesta casos de uso por puertos. `adapters` conecta HTTP y persistencia. `apps/web` consume solamente contratos HTTP.
+Antes del reset se debe confirmar `STORAGE_MODE=mongo` y `MONGODB_DATABASE=efagram_vacaciones`. El reset no usa `dropDatabase` y nunca debe ejecutarse contra una base de nómina.

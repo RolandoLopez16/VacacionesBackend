@@ -1,10 +1,7 @@
 import type { LocalDate } from "../shared/localDate.js";
 export type PeriodLifecycle = "FORMING" | "CAUSED" | "CLOSED";
 export type VacationPeriodClosureType =
-  | "RETIREMENT"
-  | "ACCOUNTING_LIQUIDATION"
-  | "MASS_MIGRATION"
-  | "MANUAL";
+  "RETIREMENT" | "ACCOUNTING_LIQUIDATION" | "MASS_MIGRATION" | "MANUAL";
 export interface VacationPolicy {
   id: string;
   effectiveFrom: LocalDate;
@@ -30,6 +27,8 @@ export interface VacationPeriod {
   closedBy?: string;
   /** Marks periods intentionally preserved by the pending-period migration. */
   pendingImportProtected?: boolean;
+  /** Marks periods excluded from the pending count that await the enjoyment import. */
+  pendingImportReleased?: boolean;
   pendingImportBatchId?: string;
   version: number;
   createdAt: string;
@@ -111,20 +110,28 @@ export interface VacationSchedule {
   createdAt: string;
   updatedAt: string;
 }
-export type ImportBatchStatus =
-  "PROCESSING" | "COMPLETED" | "COMPLETED_WITH_ERRORS" | "FAILED";
+export type ImportBatchStatus = "PROCESSING" | "COMPLETED" | "COMPLETED_WITH_ERRORS" | "FAILED";
 export interface ImportBatch {
   id: string;
   idempotencyKey: string;
+  payloadHash?: string;
   entityType: "EMPLOYMENT";
   status: ImportBatchStatus;
+  attempt?: number;
+  persistenceAttempts?: number;
   totalRows: number;
   createdRows: number;
   updatedRows: number;
   invalidRows: number;
+  duplicateRows?: number;
+  processedRows?: number;
+  durationMs?: number;
+  databaseOperations?: number;
+  chunks?: number;
   errorSummary: { row: number; message: string }[];
   createdAt: string;
   completedAt?: string;
+  failedAt?: string;
 }
 export type VacationSettlementImportStatus =
   "PREVIEW" | "AUTHORIZED" | "APPLIED" | "REJECTED" | "FAILED";
@@ -142,6 +149,9 @@ export interface VacationSettlementImportBatch {
   conflicts: number;
   invalidRows: number;
   migrationPeriods: number;
+  closedByMigration: number;
+  closedEnjoyedPeriods: number;
+  partiallyEnjoyedWarnings: string[];
   warnings: string[];
   errors: { row: number; message: string }[];
   previewToken: string;
@@ -150,17 +160,8 @@ export interface VacationSettlementImportBatch {
   appliedAt?: string;
 }
 export type VacationPeriodClosureDecision =
-  | "CLOSE"
-  | "KEEP"
-  | "PROTECTED"
-  | "FUTURE"
-  | "REVIEW"
-  | "ALREADY_CLOSED";
-export type VacationPeriodClosureBatchStatus =
-  | "PREVIEW"
-  | "AUTHORIZED"
-  | "APPLIED"
-  | "FAILED";
+  "CLOSE" | "KEEP" | "PROTECTED" | "FUTURE" | "REVIEW" | "ALREADY_CLOSED";
+export type VacationPeriodClosureBatchStatus = "PREVIEW" | "AUTHORIZED" | "APPLIED" | "FAILED";
 export interface VacationPeriodClosurePlan {
   periodId: string;
   employmentId: string;
@@ -201,18 +202,9 @@ export interface VacationPeriodClosureBatch {
   authorizedAt?: string;
   appliedAt?: string;
 }
-export type VacationPendingPeriodImportStatus =
-  | "PREVIEW"
-  | "AUTHORIZED"
-  | "APPLIED"
-  | "FAILED";
+export type VacationPendingPeriodImportStatus = "PREVIEW" | "AUTHORIZED" | "APPLIED" | "FAILED";
 export type VacationPendingPeriodDecision =
-  | "KEEP"
-  | "CLOSE"
-  | "PROTECTED"
-  | "ALREADY_CLOSED"
-  | "FORMING"
-  | "REVIEW";
+  "KEEP" | "RELEASED" | "PROTECTED" | "ALREADY_CLOSED" | "FORMING" | "REVIEW";
 export interface VacationPendingPeriodSourceLine {
   lineNumber: number;
   lineHash: string;
@@ -260,7 +252,7 @@ export interface VacationPendingPeriodImportBatch {
   missingEmployees: number;
   createdPeriods: number;
   keptPeriods: number;
-  closedPeriods: number;
+  releasedPeriods: number;
   protectedPeriods: number;
   formingPeriods: number;
   reviewPeriods: number;

@@ -1,1282 +1,335 @@
-import { MongoClient, type Collection, type Db } from "mongodb";
-import type {
-  AnnualScheduleReportQuery,
-  EmploymentPageQuery,
-  SchedulePageQuery,
-  ScheduleReportItem,
-  SettlementPageQuery,
-  VacationStore,
-} from "../../../application/ports/repositories.js";
-import type { Worker, Employment } from "../../../domain/workers/models.js";
-import type {
-  ImportBatch,
-  VacationPeriod,
-  VacationPolicy,
-  VacationSchedule,
-  VacationSettlement,
-  VacationSettlementImportBatch,
-  VacationPeriodClosureBatch,
-  VacationPendingPeriodImportBatch,
-} from "../../../domain/vacations/models.js";
-import type { User } from "../../../domain/auth/models.js";
-import type { Session } from "../../../domain/auth/session.js";
-import type { CatalogItem } from "../../../domain/admin/catalog.js";
-import type { SystemSetting } from "../../../domain/admin/settings.js";
-import type { Holiday } from "../../../domain/admin/holiday.js";
-import type { VacationAlert } from "../../../domain/vacations/alerts.js";
-import type { SchedulerRun } from "../../../domain/vacations/schedulerRun.js";
-
-type Stored<T> = T & { _id?: unknown };
-function strip<T>(doc: Stored<T>): T {
-  const { _id: _, ...value } = doc;
-  return value as T;
-}
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import { type Db, MongoClient } from "mongodb";
+import type { VacationStore } from "../../../application/ports/repositories.js";
+import { MongoAdminAuthRepository } from "./adminAuthRepository.js";
+import { MongoAlertsAuditRepository } from "./alertsAuditRepository.js";
+import { MongoImportRepository } from "./importRepository.js";
+import { ensureMongoIndexes } from "./indexes.js";
+import { resetVacationDatabase } from "./maintenance.js";
+import { MONGO_CLIENT_OPTIONS, MongoContext } from "./mongoContext.js";
+import { MongoPeriodRepository } from "./periodRepository.js";
+import { MongoScheduleRepository } from "./scheduleRepository.js";
+import { MongoSettlementRepository } from "./settlementRepository.js";
+import { MongoTransactionRepository } from "./transactionRepository.js";
+import { MongoWorkersEmploymentsRepository } from "./workersEmploymentsRepository.js";
 
 export class MongoStore implements VacationStore {
+  private readonly context: MongoContext;
+  private readonly workersEmployments: MongoWorkersEmploymentsRepository;
+  private readonly periodsRepository: MongoPeriodRepository;
+  private readonly schedulesRepository: MongoScheduleRepository;
+  private readonly settlementsRepository: MongoSettlementRepository;
+  private readonly importsRepository: MongoImportRepository;
+  private readonly adminAuthRepository: MongoAdminAuthRepository;
+  private readonly alertsAuditRepository: MongoAlertsAuditRepository;
+  private readonly transactionsRepository: MongoTransactionRepository;
+
   private constructor(
     private readonly client: MongoClient,
     private readonly db: Db,
-  ) {}
+  ) {
+    this.context = new MongoContext(client, db);
+    this.workersEmployments = new MongoWorkersEmploymentsRepository(this.context);
+    this.periodsRepository = new MongoPeriodRepository(this.context);
+    this.schedulesRepository = new MongoScheduleRepository(this.context);
+    this.settlementsRepository = new MongoSettlementRepository(this.context);
+    this.importsRepository = new MongoImportRepository(this.context);
+    this.adminAuthRepository = new MongoAdminAuthRepository(this.context);
+    this.alertsAuditRepository = new MongoAlertsAuditRepository(this.context);
+    this.transactionsRepository = new MongoTransactionRepository(this.context);
+  }
+
   static async connect(uri: string, database: string): Promise<MongoStore> {
-    const client = new MongoClient(uri, { appName: "vaca-efa-api" });
+    const client = new MongoClient(uri, MONGO_CLIENT_OPTIONS);
     await client.connect();
     const store = new MongoStore(client, client.db(database));
     await store.ensureIndexes();
     return store;
   }
-  private collection<T>(name: string): Collection<Stored<T>> {
-    return this.db.collection<Stored<T>>(name);
+
+  private ensureIndexes() {
+    return ensureMongoIndexes(this.context);
   }
-  private async ensureIndexes() {
-    await Promise.all([
-      this.collection<Worker>("workers").createIndex(
-        { normalizedDocumentNumber: 1 },
-        { unique: true },
-      ),
-      this.collection<Worker>("workers").createIndex({ fullName: 1 }),
-      this.collection<Employment>("employments").createIndex(
-        { workerId: 1, startDate: 1 },
-        { unique: true },
-      ),
-      this.collection<Employment>("employments").createIndex({
-        status: 1,
-        processName: 1,
-        startDate: 1,
-      }),
-      this.collection<VacationPeriod>("vacationPeriods").createIndex(
-        { employmentId: 1, sequence: 1 },
-        { unique: true },
-      ),
-      this.collection<VacationSchedule>("vacationSchedules").createIndex({
-        employmentId: 1,
-        startDate: 1,
-      }),
-      this.collection<VacationSchedule>("vacationSchedules").createIndex({
-        status: 1,
-        startDate: 1,
-        employmentId: 1,
-      }),
-      this.collection<VacationSchedule>("vacationSchedules").createIndex({
-        status: 1,
-        endDate: 1,
-        startDate: 1,
-      }),
-      this.collection<VacationSettlement>("vacationSettlements").createIndex({
-        employmentId: 1,
-        accountingDocument: 1,
-        status: 1,
-      }),
-      this.collection<VacationSettlement>("vacationSettlements").createIndex({
-        periodEndDate: -1,
-        status: 1,
-      }),
-      this.collection<VacationSettlement>("vacationSettlements").createIndex({
-        sourceBatchId: 1,
-      }),
-      this.collection<ImportBatch>("importBatches").createIndex(
-        { idempotencyKey: 1 },
-        { unique: true },
-      ),
-      this.collection<VacationSettlementImportBatch>(
-        "vacationSettlementImportBatches",
-      ).createIndex({ id: 1 }, { unique: true }),
-      this.collection<VacationSettlementImportBatch>(
-        "vacationSettlementImportBatches",
-      ).createIndex({ fileHash: 1 }),
-      this.collection<VacationPeriodClosureBatch>(
-        "vacationPeriodClosureBatches",
-      ).createIndex({ id: 1 }, { unique: true }),
-      this.collection<VacationPeriodClosureBatch>(
-        "vacationPeriodClosureBatches",
-      ).createIndex({ fileHash: 1 }),
-      this.collection<VacationPendingPeriodImportBatch>(
-        "vacationPendingPeriodImportBatches",
-      ).createIndex({ id: 1 }, { unique: true }),
-      this.collection<VacationPendingPeriodImportBatch>(
-        "vacationPendingPeriodImportBatches",
-      ).createIndex({ fileHash: 1 }),
-      this.collection<Session>("sessions").createIndex(
-        { id: 1 },
-        { unique: true },
-      ),
-      this.collection<Session>("sessions").createIndex({ expiresAt: 1 }),
-      this.collection<CatalogItem>("catalogItems").createIndex(
-        { type: 1, name: 1 },
-        { unique: true },
-      ),
-      this.collection<SystemSetting>("systemSettings").createIndex(
-        { key: 1 },
-        { unique: true },
-      ),
-      this.collection<Holiday>("holidays").createIndex(
-        { date: 1 },
-        { unique: true },
-      ),
-      this.collection<VacationAlert>("vacationAlerts").createIndex(
-        { employmentId: 1, type: 1, asOf: 1 },
-        { unique: true },
-      ),
-      this.collection<SchedulerRun>("schedulerRuns").createIndex(
-        { jobName: 1, asOf: 1 },
-        { unique: true },
-      ),
-      this.collection<User>("users").createIndex(
-        { username: 1 },
-        { unique: true },
-      ),
-    ]);
+  listWorkers(...args: Parameters<VacationStore["listWorkers"]>) {
+    return this.workersEmployments.listWorkers(...args);
   }
-  async listWorkers() {
-    return (await this.collection<Worker>("workers").find({}).toArray()).map(
-      strip,
-    );
+  listWorkersByIds(...args: Parameters<VacationStore["listWorkersByIds"]>) {
+    return this.workersEmployments.listWorkersByIds(...args);
   }
-  async listWorkersByIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<Worker>("workers")
-        .find({ id: { $in: ids } })
-        .toArray()
-    ).map(strip);
-  }
-  async findWorkerById(id: string) {
-    const doc = await this.collection<Worker>("workers").findOne({ id });
-    return doc ? strip(doc) : null;
-  }
-  async findWorkerByNormalizedDocument(normalizedDocumentNumber: string) {
-    const doc = await this.collection<Worker>("workers").findOne({
-      normalizedDocumentNumber,
-    });
-    return doc ? strip(doc) : null;
-  }
-  async saveWorker(worker: Worker) {
-    await this.collection<Worker>("workers").replaceOne(
-      { id: worker.id },
-      worker,
-      { upsert: true },
-    );
-  }
-  async listEmployments() {
-    return (
-      await this.collection<Employment>("employments").find({}).toArray()
-    ).map(strip);
-  }
-  async findEmploymentsByIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<Employment>("employments")
-        .find({ id: { $in: ids } })
-        .toArray()
-    ).map(strip);
-  }
-  async listEmploymentsByFilter(
-    query: Omit<EmploymentPageQuery, "page" | "pageSize" | "search">,
+  findWorkersByNormalizedDocuments(
+    ...args: Parameters<VacationStore["findWorkersByNormalizedDocuments"]>
   ) {
-    const filter: Record<string, unknown> = {};
-    if (query.status) filter.status = query.status;
-    if (query.processName)
-      filter.processName = new RegExp(escapeRegExp(query.processName), "i");
-    if (query.toDate) filter.startDate = { $lte: query.toDate };
-    if (query.fromDate)
-      filter.$or = [
-        { endDate: { $exists: false } },
-        { endDate: null },
-        { endDate: { $gte: query.fromDate } },
-      ];
-    return (
-      await this.collection<Employment>("employments")
-        .find(filter)
-        .sort({ startDate: 1, id: 1 })
-        .toArray()
-    ).map(strip);
+    return this.workersEmployments.findWorkersByNormalizedDocuments(...args);
   }
-  async listEmploymentPage(query: EmploymentPageQuery) {
-    const match: Record<string, unknown> = {};
-    if (query.status) match.status = query.status;
-    if (query.processName)
-      match.processName = new RegExp(escapeRegExp(query.processName), "i");
-    if (query.toDate) match.startDate = { $lte: query.toDate };
-    if (query.fromDate)
-      match.$or = [
-        { endDate: { $exists: false } },
-        { endDate: null },
-        { endDate: { $gte: query.fromDate } },
-      ];
-    const pipeline: Record<string, unknown>[] = [
-      { $match: match },
-      {
-        $lookup: {
-          from: "workers",
-          localField: "workerId",
-          foreignField: "id",
-          as: "worker",
-        },
-      },
-      { $unwind: "$worker" },
-    ];
-    if (query.search) {
-      const text = new RegExp(escapeRegExp(query.search), "i");
-      const normalized = query.search.replace(/\D/g, "");
-      pipeline.push({
-        $match: {
-          $or: [
-            { "worker.fullName": text },
-            { "worker.documentNumber": text },
-            {
-              "worker.normalizedDocumentNumber": normalized
-                ? new RegExp(`^${escapeRegExp(normalized)}`, "i")
-                : text,
-            },
-            { processName: text },
-            { positionName: text },
-            { supervisorName: text },
-          ],
-        },
-      });
-    }
-    pipeline.push({
-      $facet: {
-        items: [
-          { $sort: { "worker.fullName": 1, startDate: -1, id: 1 } },
-          { $skip: (query.page - 1) * query.pageSize },
-          { $limit: query.pageSize },
-          {
-            $project: {
-              _id: 0,
-              id: 1,
-              workerId: 1,
-              startDate: 1,
-              endDate: 1,
-              contractTypeId: 1,
-              contractTypeName: 1,
-              processId: 1,
-              processName: 1,
-              positionId: 1,
-              positionName: 1,
-              supervisorWorkerId: 1,
-              supervisorName: 1,
-              status: 1,
-              version: 1,
-              createdAt: 1,
-              updatedAt: 1,
-            },
-          },
-        ],
-        meta: [{ $count: "total" }],
-      },
-    });
-    const result = await this.collection<Employment>("employments")
-      .aggregate<{ items: Employment[]; meta: { total: number }[] }>(pipeline)
-      .toArray();
-    const first = result[0];
-    return { items: first?.items ?? [], total: first?.meta[0]?.total ?? 0 };
+  findWorkerById(...args: Parameters<VacationStore["findWorkerById"]>) {
+    return this.workersEmployments.findWorkerById(...args);
   }
-  async findEmploymentById(id: string) {
-    const doc = await this.collection<Employment>("employments").findOne({
-      id,
-    });
-    return doc ? strip(doc) : null;
-  }
-  async findEmploymentByWorkerAndStartDate(
-    workerId: string,
-    startDate: import("../../../domain/shared/localDate.js").LocalDate,
+  findWorkerByNormalizedDocument(
+    ...args: Parameters<VacationStore["findWorkerByNormalizedDocument"]>
   ) {
-    const doc = await this.collection<Employment>("employments").findOne({
-      workerId,
-      startDate,
-    });
-    return doc ? strip(doc) : null;
+    return this.workersEmployments.findWorkerByNormalizedDocument(...args);
   }
-  async saveEmployment(employment: Employment) {
-    await this.collection<Employment>("employments").replaceOne(
-      { id: employment.id },
-      employment,
-      { upsert: true },
-    );
+  saveWorker(...args: Parameters<VacationStore["saveWorker"]>) {
+    return this.workersEmployments.saveWorker(...args);
   }
-  async findByEmploymentId(id: string) {
-    return (
-      await this.collection<VacationPeriod>("vacationPeriods")
-        .find({ employmentId: id })
-        .sort({ sequence: 1 })
-        .toArray()
-    ).map(strip);
+  listEmployments(...args: Parameters<VacationStore["listEmployments"]>) {
+    return this.workersEmployments.listEmployments(...args);
   }
-  async findByEmploymentIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<VacationPeriod>("vacationPeriods")
-        .find({ employmentId: { $in: ids } })
-        .sort({ employmentId: 1, sequence: 1 })
-        .toArray()
-    ).map(strip);
+  findEmploymentsByIds(...args: Parameters<VacationStore["findEmploymentsByIds"]>) {
+    return this.workersEmployments.findEmploymentsByIds(...args);
   }
-  async findPeriodById(id: string) {
-    const doc = await this.collection<VacationPeriod>(
-      "vacationPeriods",
-    ).findOne({ id });
-    return doc ? strip(doc) : null;
+  findEmploymentsByWorkerIds(...args: Parameters<VacationStore["findEmploymentsByWorkerIds"]>) {
+    return this.workersEmployments.findEmploymentsByWorkerIds(...args);
   }
-  async saveMany(periods: VacationPeriod[]) {
-    if (!periods.length) return;
-    await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
-      periods.map((period) => ({
-        replaceOne: {
-          filter: { id: period.id },
-          replacement: period,
-          upsert: true,
-        },
-      })),
-    );
+  listEmploymentsByFilter(...args: Parameters<VacationStore["listEmploymentsByFilter"]>) {
+    return this.workersEmployments.listEmploymentsByFilter(...args);
   }
-  async listSchedules() {
-    return (
-      await this.collection<VacationSchedule>("vacationSchedules")
-        .find({})
-        .sort({ startDate: 1 })
-        .toArray()
-    ).map(strip);
+  listEmploymentPage(...args: Parameters<VacationStore["listEmploymentPage"]>) {
+    return this.workersEmployments.listEmploymentPage(...args);
   }
-  async listSchedulePage(query: SchedulePageQuery) {
-    const filter: Record<string, unknown> = {};
-    if (query.employmentId) filter.employmentId = query.employmentId;
-    if (query.status) filter.status = query.status;
-    const dateFilters: Record<string, unknown>[] = [];
-    if (query.fromDate) dateFilters.push({ endDate: { $gte: query.fromDate } });
-    if (query.toDate) dateFilters.push({ startDate: { $lte: query.toDate } });
-    if (dateFilters.length) filter.$and = dateFilters;
-    if (!query.search?.trim()) {
-      const [items, total] = await Promise.all([
-        this.collection<VacationSchedule>("vacationSchedules")
-          .find(filter)
-          .sort({ startDate: 1, id: 1 })
-          .skip((query.page - 1) * query.pageSize)
-          .limit(query.pageSize)
-          .toArray(),
-        this.collection<VacationSchedule>("vacationSchedules").countDocuments(filter),
-      ]);
-      return { items: items.map(strip), total };
-    }
-    const text = new RegExp(escapeRegExp(query.search.trim()), "i");
-    const normalized = query.search.replace(/\D/g, "");
-    const pipeline: Record<string, unknown>[] = [
-      { $match: filter },
-      {
-        $lookup: {
-          from: "employments",
-          localField: "employmentId",
-          foreignField: "id",
-          as: "employment",
-        },
-      },
-      { $unwind: "$employment" },
-      {
-        $lookup: {
-          from: "workers",
-          localField: "employment.workerId",
-          foreignField: "id",
-          as: "worker",
-        },
-      },
-      { $unwind: "$worker" },
-      {
-        $match: {
-          $or: [
-            { "worker.fullName": text },
-            { "worker.documentNumber": text },
-            {
-              "worker.normalizedDocumentNumber": normalized
-                ? new RegExp(`^${escapeRegExp(normalized)}`)
-                : text,
-            },
-            { "employment.processName": text },
-            { "employment.positionName": text },
-            { id: text },
-          ],
-        },
-      },
-      {
-        $facet: {
-          items: [
-            { $sort: { startDate: 1, id: 1 } },
-            { $skip: (query.page - 1) * query.pageSize },
-            { $limit: query.pageSize },
-            { $project: { employment: 0, worker: 0 } },
-          ],
-          total: [{ $count: "value" }],
-        },
-      },
-    ];
-    const [result] = await this.collection<VacationSchedule>("vacationSchedules")
-      .aggregate<{ items: Stored<VacationSchedule>[]; total: { value: number }[] }>(pipeline)
-      .toArray();
-    return {
-      items: (result?.items ?? []).map(strip),
-      total: result?.total[0]?.value ?? 0,
-    };
+  findEmploymentById(...args: Parameters<VacationStore["findEmploymentById"]>) {
+    return this.workersEmployments.findEmploymentById(...args);
   }
-  async listAnnualScheduleReport(
-    query: AnnualScheduleReportQuery,
-  ): Promise<ScheduleReportItem[]> {
-    const yearStart = `${query.year}-01-01`;
-    const yearEnd = `${query.year}-12-31`;
-    const match: Record<string, unknown> = {
-      startDate: { $lte: yearEnd },
-      endDate: { $gte: yearStart },
-      ...(query.status ? { status: query.status } : {}),
-    };
-    const pipeline: Record<string, unknown>[] = [
-      { $match: match },
-      {
-        $lookup: {
-          from: "employments",
-          localField: "employmentId",
-          foreignField: "id",
-          as: "employment",
-        },
-      },
-      { $unwind: "$employment" },
-      {
-        $lookup: {
-          from: "workers",
-          localField: "employment.workerId",
-          foreignField: "id",
-          as: "worker",
-        },
-      },
-      { $unwind: "$worker" },
-    ];
-    if (query.search?.trim()) {
-      const text = new RegExp(escapeRegExp(query.search.trim()), "i");
-      const normalized = query.search.replace(/\D/g, "");
-      pipeline.push({
-        $match: {
-          $or: [
-            { "worker.fullName": text },
-            { "worker.documentNumber": text },
-            {
-              "worker.normalizedDocumentNumber": normalized
-                ? new RegExp(`^${escapeRegExp(normalized)}`)
-                : text,
-            },
-            { "employment.processName": text },
-            { "employment.positionName": text },
-            { "employment.supervisorName": text },
-            { id: text },
-          ],
-        },
-      });
-    }
-    pipeline.push(
-      { $sort: { startDate: 1, "worker.fullName": 1, id: 1 } },
-      {
-        $project: {
-          _id: 0,
-          id: 1,
-          employmentId: 1,
-          startDate: 1,
-          endDate: 1,
-          scheduledDays: 1,
-          allocations: 1,
-          holidayWarnings: 1,
-          status: 1,
-          version: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          employeeName: "$worker.fullName",
-          employeeDocumentNumber: "$worker.documentNumber",
-          processName: "$employment.processName",
-          positionName: "$employment.positionName",
-          supervisorName: "$employment.supervisorName",
-        },
-      },
-    );
-    return this.collection<VacationSchedule>("vacationSchedules")
-      .aggregate<ScheduleReportItem>(pipeline)
-      .toArray();
-  }
-  async findSchedulesByEmploymentIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<VacationSchedule>("vacationSchedules")
-        .find({ employmentId: { $in: ids } })
-        .sort({ startDate: 1 })
-        .toArray()
-    ).map(strip);
-  }
-  async findSchedulesByIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<VacationSchedule>("vacationSchedules")
-        .find({ id: { $in: ids } })
-        .toArray()
-    ).map(strip);
-  }
-  async findScheduleById(id: string) {
-    const doc = await this.collection<VacationSchedule>(
-      "vacationSchedules",
-    ).findOne({ id });
-    return doc ? strip(doc) : null;
-  }
-  async saveSchedule(schedule: VacationSchedule) {
-    await this.collection<VacationSchedule>("vacationSchedules").replaceOne(
-      { id: schedule.id },
-      schedule,
-      { upsert: true },
-    );
-  }
-  async listSettlements(includeAnnulled = false) {
-    return (
-      await this.collection<VacationSettlement>("vacationSettlements")
-        .find(
-          includeAnnulled ? {} : { status: { $ne: "ANULADA" } },
-          { projection: { sourceLines: 0 } },
-        )
-        .sort({ periodEndDate: -1 })
-        .toArray()
-    ).map(strip);
-  }
-  async listSettlementPage(query: SettlementPageQuery) {
-    const filter: Record<string, unknown> = {
-      status: query.status ?? { $ne: "ANULADA" },
-    };
-    if (query.employmentId) filter.employmentId = query.employmentId;
-    if (query.fromDate || query.toDate)
-      filter.periodEndDate = {
-        ...(query.fromDate ? { $gte: query.fromDate } : {}),
-        ...(query.toDate ? { $lte: query.toDate } : {}),
-      };
-    const collection = this.collection<VacationSettlement>(
-      "vacationSettlements",
-    );
-    const pipeline: Record<string, unknown>[] = [
-      { $match: filter },
-      {
-        $lookup: {
-          from: "employments",
-          localField: "employmentId",
-          foreignField: "id",
-          as: "employment",
-        },
-      },
-      { $unwind: { path: "$employment", preserveNullAndEmptyArrays: true } },
-      {
-        $lookup: {
-          from: "workers",
-          localField: "employment.workerId",
-          foreignField: "id",
-          as: "worker",
-        },
-      },
-      { $unwind: { path: "$worker", preserveNullAndEmptyArrays: true } },
-    ];
-    if (query.search?.trim()) {
-      const text = new RegExp(escapeRegExp(query.search.trim()), "i");
-      const normalized = query.search.replace(/\D/g, "");
-      pipeline.push({
-        $match: {
-          $or: [
-            { accountingDocument: text },
-            { employmentId: text },
-            { sourceKey: text },
-            { "worker.fullName": text },
-            { "worker.documentNumber": text },
-            {
-              "worker.normalizedDocumentNumber": normalized
-                ? new RegExp(`^${escapeRegExp(normalized)}`)
-                : text,
-            },
-          ],
-        },
-      });
-    }
-    pipeline.push({
-      $facet: {
-        items: [
-          { $sort: { periodEndDate: -1, createdAt: -1 } },
-          { $skip: (query.page - 1) * query.pageSize },
-          { $limit: query.pageSize },
-          {
-            $project: {
-              _id: 0,
-              id: 1,
-              employmentId: 1,
-              sourceScheduleId: 1,
-              sourceBatchId: 1,
-              sourceKey: 1,
-              source: 1,
-              status: 1,
-              enjoymentStartDate: 1,
-              enjoymentEndDate: 1,
-              periodEndDate: 1,
-              enjoyedDays: 1,
-              compensatedDays: 1,
-              calendarDays: 1,
-              amountCOP: 1,
-              accountingDocument: 1,
-              observation: 1,
-              allocations: 1,
-              version: 1,
-              cancelledAt: 1,
-              cancelledBy: 1,
-              cancellationReason: 1,
-              createdAt: 1,
-              updatedAt: 1,
-              employeeName: "$worker.fullName",
-              employeeDocumentNumber: "$worker.documentNumber",
-            },
-          },
-        ],
-        total: [{ $count: "value" }],
-      },
-    });
-    const [result] = await collection
-      .aggregate<{
-        items: (VacationSettlement & {
-          employeeName?: string;
-          employeeDocumentNumber?: string;
-        })[];
-        total: { value: number }[];
-      }>(pipeline)
-      .toArray();
-    return {
-      items: result?.items ?? [],
-      total: result?.total[0]?.value ?? 0,
-    };
-  }
-  async findSettlementsByEmploymentIds(ids: string[]) {
-    if (!ids.length) return [];
-    return (
-      await this.collection<VacationSettlement>("vacationSettlements")
-        .find(
-          { employmentId: { $in: ids }, status: { $ne: "ANULADA" } },
-          { projection: { sourceLines: 0 } },
-        )
-        .sort({ enjoymentStartDate: 1 })
-        .toArray()
-    ).map(strip);
-  }
-  async findSettlementById(id: string) {
-    const [doc] = await this.collection<VacationSettlement>(
-      "vacationSettlements",
-    )
-      .aggregate<
-        VacationSettlement & {
-          employeeName?: string;
-          employeeDocumentNumber?: string;
-        }
-      >([
-        { $match: { id } },
-        {
-          $lookup: {
-            from: "employments",
-            localField: "employmentId",
-            foreignField: "id",
-            as: "employment",
-          },
-        },
-        {
-          $unwind: {
-            path: "$employment",
-            preserveNullAndEmptyArrays: true,
-          },
-        },
-        {
-          $lookup: {
-            from: "workers",
-            localField: "employment.workerId",
-            foreignField: "id",
-            as: "worker",
-          },
-        },
-        { $unwind: { path: "$worker", preserveNullAndEmptyArrays: true } },
-        {
-          $set: {
-            employeeName: "$worker.fullName",
-            employeeDocumentNumber: "$worker.documentNumber",
-          },
-        },
-        { $project: { employment: 0, worker: 0 } },
-      ])
-      .toArray();
-    return doc ? strip(doc) : null;
-  }
-  async findSettlementBySourceKey(sourceKey: string) {
-    const doc = await this.collection<VacationSettlement>(
-      "vacationSettlements",
-    ).findOne({ sourceKey });
-    return doc ? strip(doc) : null;
-  }
-  async saveSettlement(settlement: VacationSettlement) {
-    await this.collection<VacationSettlement>("vacationSettlements").replaceOne(
-      { id: settlement.id },
-      settlement,
-      { upsert: true },
-    );
-  }
-  async findImportBatchByIdempotencyKey(key: string) {
-    const doc = await this.collection<ImportBatch>("importBatches").findOne({
-      idempotencyKey: key,
-    });
-    return doc ? strip(doc) : null;
-  }
-  async saveImportBatch(batch: ImportBatch) {
-    await this.collection<ImportBatch>("importBatches").replaceOne(
-      { idempotencyKey: batch.idempotencyKey },
-      batch,
-      { upsert: true },
-    );
-  }
-  async findVacationSettlementImportBatch(id: string) {
-    const doc = await this.collection<VacationSettlementImportBatch>(
-      "vacationSettlementImportBatches",
-    ).findOne({ id });
-    return doc ? strip(doc) : null;
-  }
-  async findVacationSettlementImportByFileHash(hash: string) {
-    const doc = await this.collection<VacationSettlementImportBatch>(
-      "vacationSettlementImportBatches",
-    ).findOne({ fileHash: hash });
-    return doc ? strip(doc) : null;
-  }
-  async saveVacationSettlementImportBatch(
-    batch: VacationSettlementImportBatch,
+  findEmploymentByWorkerAndStartDate(
+    ...args: Parameters<VacationStore["findEmploymentByWorkerAndStartDate"]>
   ) {
-    await this.collection<VacationSettlementImportBatch>(
-      "vacationSettlementImportBatches",
-    ).replaceOne({ id: batch.id }, batch, { upsert: true });
+    return this.workersEmployments.findEmploymentByWorkerAndStartDate(...args);
   }
-  async findVacationPeriodClosureBatch(id: string) {
-    const doc = await this.collection<VacationPeriodClosureBatch>(
-      "vacationPeriodClosureBatches",
-    ).findOne({ id });
-    return doc ? strip(doc) : null;
+  saveEmployment(...args: Parameters<VacationStore["saveEmployment"]>) {
+    return this.workersEmployments.saveEmployment(...args);
   }
-  async findVacationPeriodClosureByFileHash(fileHash: string) {
-    const doc = await this.collection<VacationPeriodClosureBatch>(
-      "vacationPeriodClosureBatches",
-    ).findOne({ fileHash }, { sort: { createdAt: -1 } });
-    return doc ? strip(doc) : null;
+  findByEmploymentId(...args: Parameters<VacationStore["findByEmploymentId"]>) {
+    return this.periodsRepository.findByEmploymentId(...args);
   }
-  async saveVacationPeriodClosureBatch(batch: VacationPeriodClosureBatch) {
-    await this.collection<VacationPeriodClosureBatch>(
-      "vacationPeriodClosureBatches",
-    ).replaceOne({ id: batch.id }, batch, { upsert: true });
+  findByEmploymentIds(...args: Parameters<VacationStore["findByEmploymentIds"]>) {
+    return this.periodsRepository.findByEmploymentIds(...args);
   }
-  async findVacationPendingPeriodImportBatch(id: string) {
-    const doc = await this.collection<VacationPendingPeriodImportBatch>(
-      "vacationPendingPeriodImportBatches",
-    ).findOne({ id });
-    return doc ? strip(doc) : null;
+  findPeriodById(...args: Parameters<VacationStore["findPeriodById"]>) {
+    return this.periodsRepository.findPeriodById(...args);
   }
-  async findVacationPendingPeriodImportByFileHash(fileHash: string) {
-    const doc = await this.collection<VacationPendingPeriodImportBatch>(
-      "vacationPendingPeriodImportBatches",
-    ).findOne({ fileHash }, { sort: { createdAt: -1 } });
-    return doc ? strip(doc) : null;
+  saveMany(...args: Parameters<VacationStore["saveMany"]>) {
+    return this.periodsRepository.saveMany(...args);
   }
-  async saveVacationPendingPeriodImportBatch(
-    batch: VacationPendingPeriodImportBatch,
+  listSchedules(...args: Parameters<VacationStore["listSchedules"]>) {
+    return this.schedulesRepository.listSchedules(...args);
+  }
+  listSchedulePage(...args: Parameters<VacationStore["listSchedulePage"]>) {
+    return this.schedulesRepository.listSchedulePage(...args);
+  }
+  listAnnualScheduleReport(...args: Parameters<VacationStore["listAnnualScheduleReport"]>) {
+    return this.schedulesRepository.listAnnualScheduleReport(...args);
+  }
+  findSchedulesByEmploymentIds(...args: Parameters<VacationStore["findSchedulesByEmploymentIds"]>) {
+    return this.schedulesRepository.findSchedulesByEmploymentIds(...args);
+  }
+  findSchedulesByIds(...args: Parameters<VacationStore["findSchedulesByIds"]>) {
+    return this.schedulesRepository.findSchedulesByIds(...args);
+  }
+  findScheduleById(...args: Parameters<VacationStore["findScheduleById"]>) {
+    return this.schedulesRepository.findScheduleById(...args);
+  }
+  saveSchedule(...args: Parameters<VacationStore["saveSchedule"]>) {
+    return this.schedulesRepository.saveSchedule(...args);
+  }
+  listSettlements(...args: Parameters<VacationStore["listSettlements"]>) {
+    return this.settlementsRepository.listSettlements(...args);
+  }
+  listSettlementPage(...args: Parameters<VacationStore["listSettlementPage"]>) {
+    return this.settlementsRepository.listSettlementPage(...args);
+  }
+  findSettlementsByEmploymentIds(
+    ...args: Parameters<VacationStore["findSettlementsByEmploymentIds"]>
   ) {
-    await this.collection<VacationPendingPeriodImportBatch>(
-      "vacationPendingPeriodImportBatches",
-    ).replaceOne({ id: batch.id }, batch, { upsert: true });
+    return this.settlementsRepository.findSettlementsByEmploymentIds(...args);
   }
-  async findSessionById(id: string) {
-    const doc = await this.collection<Session>("sessions").findOne({ id });
-    return doc ? strip(doc) : null;
+  findSettlementById(...args: Parameters<VacationStore["findSettlementById"]>) {
+    return this.settlementsRepository.findSettlementById(...args);
   }
-  async saveSession(session: Session) {
-    await this.collection<Session>("sessions").replaceOne(
-      { id: session.id },
-      session,
-      { upsert: true },
-    );
+  findSettlementBySourceKey(...args: Parameters<VacationStore["findSettlementBySourceKey"]>) {
+    return this.settlementsRepository.findSettlementBySourceKey(...args);
   }
-  async revokeSession(id: string, revokedAt: string) {
-    await this.collection<Session>("sessions").updateOne(
-      { id },
-      { $set: { revokedAt } },
-    );
+  saveSettlement(...args: Parameters<VacationStore["saveSettlement"]>) {
+    return this.settlementsRepository.saveSettlement(...args);
   }
-  async listCatalog(type: string) {
-    return (
-      await this.collection<CatalogItem>("catalogItems")
-        .find({ type, active: true })
-        .sort({ name: 1 })
-        .toArray()
-    ).map(strip);
-  }
-  async saveCatalog(item: CatalogItem) {
-    await this.collection<CatalogItem>("catalogItems").replaceOne(
-      { id: item.id },
-      item,
-      { upsert: true },
-    );
-  }
-  async findSystemSettingByKey(key: string) {
-    const doc = await this.collection<SystemSetting>("systemSettings").findOne({
-      key,
-    });
-    return doc ? strip(doc) : null;
-  }
-  async saveSystemSetting(setting: SystemSetting) {
-    await this.collection<SystemSetting>("systemSettings").replaceOne(
-      { key: setting.key },
-      setting,
-      { upsert: true },
-    );
-  }
-  async listHolidays(year?: number) {
-    const start = `${year}-01-01` as Holiday["date"];
-    const end = `${(year ?? 0) + 1}-01-01` as Holiday["date"];
-    const filter =
-      year === undefined ? {} : { date: { $gte: start, $lt: end } };
-    return (
-      await this.collection<Holiday>("holidays")
-        .find(filter)
-        .sort({ date: 1 })
-        .toArray()
-    ).map(strip);
-  }
-  async saveHoliday(holiday: Holiday) {
-    await this.collection<Holiday>("holidays").replaceOne(
-      { id: holiday.id },
-      holiday,
-      { upsert: true },
-    );
-  }
-  async listAlerts(filters: { employmentId?: string; active?: boolean } = {}) {
-    const filter = {
-      ...(filters.employmentId ? { employmentId: filters.employmentId } : {}),
-      ...(filters.active === undefined ? {} : { active: filters.active }),
-    };
-    return (
-      await this.collection<VacationAlert>("vacationAlerts")
-        .find(filter)
-        .sort({ asOf: -1, employmentId: 1 })
-        .toArray()
-    ).map(strip);
-  }
-  async saveAlert(alert: VacationAlert) {
-    await this.collection<VacationAlert>("vacationAlerts").replaceOne(
-      { id: alert.id },
-      alert,
-      { upsert: true },
-    );
-  }
-  async listSchedulerRuns() {
-    return (
-      await this.collection<SchedulerRun>("schedulerRuns")
-        .find({})
-        .sort({ asOf: -1 })
-        .toArray()
-    ).map(strip);
-  }
-  async findSchedulerRunById(id: string) {
-    const doc = await this.collection<SchedulerRun>("schedulerRuns").findOne({
-      id,
-    });
-    return doc ? strip(doc) : null;
-  }
-  async saveSchedulerRun(run: SchedulerRun) {
-    await this.collection<SchedulerRun>("schedulerRuns").replaceOne(
-      { id: run.id },
-      run,
-      { upsert: true },
-    );
-  }
-  async saveScheduleAndAudit(
-    schedule: VacationSchedule,
-    audit: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    },
+  findImportBatchByIdempotencyKey(
+    ...args: Parameters<VacationStore["findImportBatchByIdempotencyKey"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        await this.collection<VacationSchedule>("vacationSchedules").replaceOne(
-          { id: schedule.id },
-          schedule,
-          { upsert: true, session },
-        );
-        await this.collection<typeof audit>("auditEvents").insertOne(audit, {
-          session,
-        });
-      });
-    });
+    return this.importsRepository.findImportBatchByIdempotencyKey(...args);
   }
-  async completeScheduleTransaction(
-    schedule: VacationSchedule,
-    settlement: VacationSettlement,
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
+  findImportBatchById(...args: Parameters<VacationStore["findImportBatchById"]>) {
+    return this.importsRepository.findImportBatchById(...args);
+  }
+  claimImportBatch(...args: Parameters<VacationStore["claimImportBatch"]>) {
+    return this.importsRepository.claimImportBatch(...args);
+  }
+  markImportBatchFailed(...args: Parameters<VacationStore["markImportBatchFailed"]>) {
+    return this.importsRepository.markImportBatchFailed(...args);
+  }
+  saveImportBatch(...args: Parameters<VacationStore["saveImportBatch"]>) {
+    return this.importsRepository.saveImportBatch(...args);
+  }
+  listImportBatchesPage(...args: Parameters<VacationStore["listImportBatchesPage"]>) {
+    return this.importsRepository.listImportBatchesPage(...args);
+  }
+  findVacationSettlementImportBatch(
+    ...args: Parameters<VacationStore["findVacationSettlementImportBatch"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        await this.collection<VacationSettlement>(
-          "vacationSettlements",
-        ).replaceOne({ id: settlement.id }, settlement, {
-          upsert: true,
-          session,
-        });
-        await this.collection<VacationSchedule>("vacationSchedules").replaceOne(
-          { id: schedule.id },
-          schedule,
-          { upsert: true, session },
-        );
-        for (const event of audits)
-          await this.collection<typeof event>("auditEvents").insertOne(event, {
-            session,
-          });
-      });
-    });
+    return this.importsRepository.findVacationSettlementImportBatch(...args);
   }
-  async closeRetiredEmploymentTransaction(
-    employment: Employment,
-    periods: VacationPeriod[],
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
+  findVacationSettlementImportByFileHash(
+    ...args: Parameters<VacationStore["findVacationSettlementImportByFileHash"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        await this.collection<Employment>('employments').replaceOne(
-          { id: employment.id },
-          employment,
-          { upsert: true, session },
-        );
-        if (periods.length)
-          await this.collection<VacationPeriod>('vacationPeriods').bulkWrite(
-            periods.map((period) => ({
-              replaceOne: {
-                filter: { id: period.id },
-                replacement: period,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        if (audits.length)
-          await this.collection<(typeof audits)[number]>('auditEvents').insertMany(
-            audits,
-            { session },
-          );
-      });
-    });
+    return this.importsRepository.findVacationSettlementImportByFileHash(...args);
   }
-  async closeRetiredEmploymentsTransaction(
-    employments: Employment[],
-    periods: VacationPeriod[],
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
+  saveVacationSettlementImportBatch(
+    ...args: Parameters<VacationStore["saveVacationSettlementImportBatch"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        if (employments.length)
-          await this.collection<Employment>('employments').bulkWrite(
-            employments.map((employment) => ({
-              replaceOne: {
-                filter: { id: employment.id },
-                replacement: employment,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        if (periods.length)
-          await this.collection<VacationPeriod>('vacationPeriods').bulkWrite(
-            periods.map((period) => ({
-              replaceOne: {
-                filter: { id: period.id },
-                replacement: period,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        if (audits.length)
-          await this.collection<(typeof audits)[number]>('auditEvents').insertMany(
-            audits,
-            { session },
-          );
-      });
-    });
+    return this.importsRepository.saveVacationSettlementImportBatch(...args);
   }
-  async applyVacationSettlementImport(
-    batch: VacationSettlementImportBatch,
-    settlements: VacationSettlement[],
-    periods: VacationPeriod[],
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
-    schedules: VacationSchedule[] = [],
+  findVacationPeriodClosureBatch(
+    ...args: Parameters<VacationStore["findVacationPeriodClosureBatch"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        if (settlements.length)
-          await this.collection<VacationSettlement>(
-            "vacationSettlements",
-          ).bulkWrite(
-            settlements.map((settlement) => ({
-              replaceOne: {
-                filter: { id: settlement.id },
-                replacement: settlement,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        if (periods.length)
-          await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
-            periods.map((period) => ({
-              replaceOne: {
-                filter: { id: period.id },
-                replacement: period,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        if (schedules.length)
-          await this.collection<VacationSchedule>("vacationSchedules").bulkWrite(
-            schedules.map((schedule) => ({
-              replaceOne: {
-                filter: { id: schedule.id },
-                replacement: schedule,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        await this.collection<VacationSettlementImportBatch>(
-          "vacationSettlementImportBatches",
-        ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
-        for (const event of audits)
-          await this.collection<typeof event>("auditEvents").insertOne(event, {
-            session,
-          });
-      });
-    });
+    return this.importsRepository.findVacationPeriodClosureBatch(...args);
   }
-  async applyVacationPeriodClosure(
-    batch: VacationPeriodClosureBatch,
-    periods: VacationPeriod[],
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
+  findVacationPeriodClosureByFileHash(
+    ...args: Parameters<VacationStore["findVacationPeriodClosureByFileHash"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        if (periods.length)
-          await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
-            periods.map((period) => ({
-              replaceOne: {
-                filter: { id: period.id },
-                replacement: period,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        await this.collection<VacationPeriodClosureBatch>(
-          "vacationPeriodClosureBatches",
-        ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
-        if (audits.length)
-          await this.collection<(typeof audits)[number]>("auditEvents").insertMany(
-            audits,
-            { session },
-          );
-      });
-    });
+    return this.importsRepository.findVacationPeriodClosureByFileHash(...args);
   }
-  async applyVacationPendingPeriodImport(
-    batch: VacationPendingPeriodImportBatch,
-    periods: VacationPeriod[],
-    audits: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    }[],
+  saveVacationPeriodClosureBatch(
+    ...args: Parameters<VacationStore["saveVacationPeriodClosureBatch"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        if (periods.length)
-          await this.collection<VacationPeriod>("vacationPeriods").bulkWrite(
-            periods.map((period) => ({
-              replaceOne: {
-                filter: { id: period.id },
-                replacement: period,
-                upsert: true,
-              },
-            })),
-            { session },
-          );
-        await this.collection<VacationPendingPeriodImportBatch>(
-          "vacationPendingPeriodImportBatches",
-        ).replaceOne({ id: batch.id }, batch, { upsert: true, session });
-        if (audits.length)
-          await this.collection<(typeof audits)[number]>("auditEvents").insertMany(
-            audits,
-            { session },
-          );
-      });
-    });
+    return this.importsRepository.saveVacationPeriodClosureBatch(...args);
   }
-  async saveSettlementAndAudit(
-    settlement: VacationSettlement,
-    audit: {
-      id: string;
-      actorId: string;
-      action: string;
-      entityType: string;
-      entityId: string;
-      metadata: unknown;
-      createdAt: string;
-    },
+  findVacationPendingPeriodImportBatch(
+    ...args: Parameters<VacationStore["findVacationPendingPeriodImportBatch"]>
   ) {
-    await this.client.withSession(async (session) => {
-      await session.withTransaction(async () => {
-        await this.collection<VacationSettlement>(
-          "vacationSettlements",
-        ).replaceOne({ id: settlement.id }, settlement, {
-          upsert: true,
-          session,
-        });
-        await this.collection<typeof audit>("auditEvents").insertOne(audit, {
-          session,
-        });
-      });
-    });
+    return this.importsRepository.findVacationPendingPeriodImportBatch(...args);
   }
-  async listUsers() {
-    return (
-      await this.collection<User>("users")
-        .find({})
-        .sort({ username: 1 })
-        .toArray()
-    ).map(strip);
+  findVacationPendingPeriodImportByFileHash(
+    ...args: Parameters<VacationStore["findVacationPendingPeriodImportByFileHash"]>
+  ) {
+    return this.importsRepository.findVacationPendingPeriodImportByFileHash(...args);
   }
-  async findUserByUsername(username: string) {
-    const doc = await this.collection<User>("users").findOne({ username });
-    return doc ? strip(doc) : null;
+  saveVacationPendingPeriodImportBatch(
+    ...args: Parameters<VacationStore["saveVacationPendingPeriodImportBatch"]>
+  ) {
+    return this.importsRepository.saveVacationPendingPeriodImportBatch(...args);
   }
-  async saveUser(user: User) {
-    await this.collection<User>("users").replaceOne({ id: user.id }, user, {
-      upsert: true,
-    });
+  findSessionById(...args: Parameters<VacationStore["findSessionById"]>) {
+    return this.adminAuthRepository.findSessionById(...args);
   }
-  async current(asOf: import("../../../domain/shared/localDate.js").LocalDate) {
-    const policy = await this.collection<VacationPolicy>(
-      "vacationPolicies",
-    ).findOne(
-      { active: true, effectiveFrom: { $lte: asOf } },
-      { sort: { effectiveFrom: -1 } },
-    );
-    if (policy) return strip(policy);
-    const initial: VacationPolicy = {
-      id: "default",
-      effectiveFrom: "2026-01-01",
-      daysPerCompletedYear: 15,
-      overdueAfterMonths: 12,
-      upcomingAccrualAlerts: [30, 60, 90],
-      active: true,
-    };
-    await this.collection<VacationPolicy>("vacationPolicies").insertOne(
-      initial,
-    );
-    return initial;
+  saveSession(...args: Parameters<VacationStore["saveSession"]>) {
+    return this.adminAuthRepository.saveSession(...args);
   }
-  async savePolicy(policy: VacationPolicy) {
-    await this.collection<VacationPolicy>("vacationPolicies").replaceOne(
-      { id: policy.id },
-      policy,
-      { upsert: true },
-    );
+  revokeSession(...args: Parameters<VacationStore["revokeSession"]>) {
+    return this.adminAuthRepository.revokeSession(...args);
   }
-  async append(event: {
-    id: string;
-    actorId: string;
-    action: string;
-    entityType: string;
-    entityId: string;
-    metadata: unknown;
-    createdAt: string;
-  }) {
-    await this.collection<typeof event>("auditEvents").insertOne(event);
+  listCatalog(...args: Parameters<VacationStore["listCatalog"]>) {
+    return this.adminAuthRepository.listCatalog(...args);
   }
-  async listAudits() {
-    return (
-      await this.collection<unknown>("auditEvents")
-        .find({})
-        .sort({ createdAt: -1 })
-        .limit(500)
-        .toArray()
-    ).map((doc) => strip(doc as Stored<unknown>));
+  listCatalogPage(...args: Parameters<VacationStore["listCatalogPage"]>) {
+    return this.adminAuthRepository.listCatalogPage(...args);
+  }
+  saveCatalog(...args: Parameters<VacationStore["saveCatalog"]>) {
+    return this.adminAuthRepository.saveCatalog(...args);
+  }
+  findSystemSettingByKey(...args: Parameters<VacationStore["findSystemSettingByKey"]>) {
+    return this.adminAuthRepository.findSystemSettingByKey(...args);
+  }
+  saveSystemSetting(...args: Parameters<VacationStore["saveSystemSetting"]>) {
+    return this.adminAuthRepository.saveSystemSetting(...args);
+  }
+  listHolidays(...args: Parameters<VacationStore["listHolidays"]>) {
+    return this.adminAuthRepository.listHolidays(...args);
+  }
+  listHolidaysPage(...args: Parameters<VacationStore["listHolidaysPage"]>) {
+    return this.adminAuthRepository.listHolidaysPage(...args);
+  }
+  saveHoliday(...args: Parameters<VacationStore["saveHoliday"]>) {
+    return this.adminAuthRepository.saveHoliday(...args);
+  }
+  listAlerts(...args: Parameters<VacationStore["listAlerts"]>) {
+    return this.alertsAuditRepository.listAlerts(...args);
+  }
+  listAlertsPage(...args: Parameters<VacationStore["listAlertsPage"]>) {
+    return this.alertsAuditRepository.listAlertsPage(...args);
+  }
+  saveAlert(...args: Parameters<VacationStore["saveAlert"]>) {
+    return this.alertsAuditRepository.saveAlert(...args);
+  }
+  listSchedulerRuns(...args: Parameters<VacationStore["listSchedulerRuns"]>) {
+    return this.alertsAuditRepository.listSchedulerRuns(...args);
+  }
+  listSchedulerRunsPage(...args: Parameters<VacationStore["listSchedulerRunsPage"]>) {
+    return this.alertsAuditRepository.listSchedulerRunsPage(...args);
+  }
+  findSchedulerRunById(...args: Parameters<VacationStore["findSchedulerRunById"]>) {
+    return this.alertsAuditRepository.findSchedulerRunById(...args);
+  }
+  saveSchedulerRun(...args: Parameters<VacationStore["saveSchedulerRun"]>) {
+    return this.alertsAuditRepository.saveSchedulerRun(...args);
+  }
+  append(...args: Parameters<VacationStore["append"]>) {
+    return this.alertsAuditRepository.append(...args);
+  }
+  listAudits(...args: Parameters<VacationStore["listAudits"]>) {
+    return this.alertsAuditRepository.listAudits(...args);
+  }
+  listAuditsPage(...args: Parameters<VacationStore["listAuditsPage"]>) {
+    return this.alertsAuditRepository.listAuditsPage(...args);
+  }
+  listUsers(...args: Parameters<VacationStore["listUsers"]>) {
+    return this.adminAuthRepository.listUsers(...args);
+  }
+  listUsersPage(...args: Parameters<VacationStore["listUsersPage"]>) {
+    return this.adminAuthRepository.listUsersPage(...args);
+  }
+  findUserByUsername(...args: Parameters<VacationStore["findUserByUsername"]>) {
+    return this.adminAuthRepository.findUserByUsername(...args);
+  }
+  saveUser(...args: Parameters<VacationStore["saveUser"]>) {
+    return this.adminAuthRepository.saveUser(...args);
+  }
+  current(...args: Parameters<VacationStore["current"]>) {
+    return this.adminAuthRepository.current(...args);
+  }
+  savePolicy(...args: Parameters<VacationStore["savePolicy"]>) {
+    return this.adminAuthRepository.savePolicy(...args);
+  }
+  saveScheduleAndAudit(...args: Parameters<VacationStore["saveScheduleAndAudit"]>) {
+    return this.transactionsRepository.saveScheduleAndAudit(...args);
+  }
+  applyEmploymentImport(...args: Parameters<VacationStore["applyEmploymentImport"]>) {
+    return this.transactionsRepository.applyEmploymentImport(...args);
+  }
+  completeScheduleTransaction(...args: Parameters<VacationStore["completeScheduleTransaction"]>) {
+    return this.transactionsRepository.completeScheduleTransaction(...args);
+  }
+  closeRetiredEmploymentTransaction(
+    ...args: Parameters<VacationStore["closeRetiredEmploymentTransaction"]>
+  ) {
+    return this.transactionsRepository.closeRetiredEmploymentTransaction(...args);
+  }
+  closeRetiredEmploymentsTransaction(
+    ...args: Parameters<VacationStore["closeRetiredEmploymentsTransaction"]>
+  ) {
+    return this.transactionsRepository.closeRetiredEmploymentsTransaction(...args);
+  }
+  applyVacationSettlementImport(
+    ...args: Parameters<VacationStore["applyVacationSettlementImport"]>
+  ) {
+    return this.transactionsRepository.applyVacationSettlementImport(...args);
+  }
+  applyVacationPeriodClosure(...args: Parameters<VacationStore["applyVacationPeriodClosure"]>) {
+    return this.transactionsRepository.applyVacationPeriodClosure(...args);
+  }
+  applyVacationPendingPeriodImport(
+    ...args: Parameters<VacationStore["applyVacationPendingPeriodImport"]>
+  ) {
+    return this.transactionsRepository.applyVacationPendingPeriodImport(...args);
+  }
+  saveSettlementAndAudit(...args: Parameters<VacationStore["saveSettlementAndAudit"]>) {
+    return this.transactionsRepository.saveSettlementAndAudit(...args);
   }
   async close() {
     await this.client.close();
@@ -1285,27 +338,6 @@ export class MongoStore implements VacationStore {
     await this.db.command({ ping: 1 });
   }
   async resetVacationDatabase() {
-    const collections = [
-      "workers",
-      "employments",
-      "vacationPeriods",
-      "vacationSchedules",
-      "vacationSettlements",
-      "vacationPolicies",
-      "auditEvents",
-      "importBatches",
-      "vacationSettlementImportBatches",
-      "vacationPendingPeriodImportBatches",
-      "sessions",
-      "catalogItems",
-      "holidays",
-      "vacationAlerts",
-      "schedulerRuns",
-      "users",
-    ];
-    await Promise.all(
-      collections.map((name) => this.db.collection(name).deleteMany({})),
-    );
-    await this.ensureIndexes();
+    await resetVacationDatabase(this.context);
   }
 }

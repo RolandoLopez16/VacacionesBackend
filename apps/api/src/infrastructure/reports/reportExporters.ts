@@ -1,9 +1,50 @@
-function xml(value:unknown){return String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');}
-export function excelSafe(value:unknown){const text=String(value??'');return /^[=+\-@]/.test(text)?`'${text}`:text;}
-function crc32(buffer:Buffer){let crc=0xffffffff;for(const byte of buffer){crc^=byte;for(let bit=0;bit<8;bit++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}return(crc^0xffffffff)>>>0;}
-function u16(value:number){const buffer=Buffer.alloc(2);buffer.writeUInt16LE(value,0);return buffer;}
-function u32(value:number){const buffer=Buffer.alloc(4);buffer.writeUInt32LE(value>>>0,0);return buffer;}
-function zip(files:{name:string;data:Buffer}[]){const locals:Buffer[]=[];const centrals:Buffer[]=[];let offset=0;for(const file of files){const name=Buffer.from(file.name);const crc=crc32(file.data);const local=Buffer.concat([u32(0x04034b50),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(file.data.length),u32(file.data.length),u16(name.length),u16(0),name,file.data]);locals.push(local);const central=Buffer.concat([u32(0x02014b50),u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(file.data.length),u32(file.data.length),u16(name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(offset),name]);centrals.push(central);offset+=local.length;}const directory=Buffer.concat(centrals);const end=Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(directory.length),u32(offset),u16(0)]);return Buffer.concat([...locals,directory,end]);}
-export function buildXlsx(rows:unknown[][]){const sheetRows=rows.map((row,rowIndex)=>`<row r="${rowIndex+1}">${row.map((value,columnIndex)=>{const ref=`${String.fromCharCode(65+Math.min(columnIndex,25))}${rowIndex+1}`;return`<c r="${ref}" t="inlineStr"><is><t>${xml(excelSafe(value))}</t></is></c>`;}).join('')}</row>`).join('');const files=[{name:'[Content_Types].xml',data:Buffer.from('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')},{name:'_rels/.rels',data:Buffer.from('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')},{name:'xl/workbook.xml',data:Buffer.from('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Reporte" sheetId="1" r:id="rId1"/></sheets></workbook>')},{name:'xl/_rels/workbook.xml.rels',data:Buffer.from('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')},{name:'xl/worksheets/sheet1.xml',data:Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`)}];return zip(files);}
-function pdfText(value:unknown){return String(value??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\x20-\x7e]/g,' ').replaceAll('\\','\\\\').replaceAll('(','\\(').replaceAll(')','\\)');}
-export function buildPdf(rows:unknown[][]){const lines=rows.slice(0,50).map(row=>row.map(pdfText).join(' | ').slice(0,150));const stream=['BT','/F1 8 Tf','40 800 Td',...lines.flatMap((line,index)=>[index===0?`(${line}) Tj`:`0 -14 Td (${line}) Tj`]),'ET'].join('\n');const objects=[`<< /Type /Catalog /Pages 2 0 R >>`,`<< /Type /Pages /Kids [3 0 R] /Count 1 >>`,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,`<< /Length ${Buffer.byteLength(stream,'latin1')} >>\nstream\n${stream}\nendstream`,`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`];let output='%PDF-1.4\n';const offsets=[0];for(let index=0;index<objects.length;index++){offsets.push(Buffer.byteLength(output,'latin1'));output+=`${index+1} 0 obj\n${objects[index]}\nendobj\n`;}const xref=Buffer.byteLength(output,'latin1');output+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>`${String(offset).padStart(10,'0')} 00000 n `).join('\n')}\ntrailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;return Buffer.from(output,'latin1');}
+import PDFDocument from "pdfkit";
+import { runExcelJsSync } from "../exceljsSync.js";
+
+export function excelSafe(value: unknown) {
+  const text = String(value ?? "");
+  return /^[=+\-@]/.test(text) ? `'${text}` : text;
+}
+
+export function buildXlsx(rows: unknown[][]) {
+  return runExcelJsSync(
+    "build",
+    rows.map((row) => row.map(excelSafe)),
+  );
+}
+
+function pdfText(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7e]/g, " ");
+}
+
+export function buildPdf(rows: unknown[][]) {
+  const document = new PDFDocument({
+    size: [612, 842],
+    margins: { top: 40, right: 40, bottom: 40, left: 40 },
+    pdfVersion: "1.4",
+    info: {
+      Title: "Reporte de vacaciones",
+      Author: "Sistema Web Vaca EFA",
+    },
+  });
+
+  rows.forEach((row, index) => {
+    document.font(index === 0 ? "Helvetica-Bold" : "Helvetica").fontSize(8);
+    document.text(row.map(pdfText).join(" | "), {
+      width: 532,
+      lineGap: 2,
+    });
+    if (index < rows.length - 1) document.moveDown(0.25);
+  });
+  document.end();
+
+  const chunks: Buffer[] = [];
+  let chunk: Buffer | null;
+  while ((chunk = document.read() as Buffer | null) !== null) chunks.push(Buffer.from(chunk));
+  const output = Buffer.concat(chunks);
+  if (!output.length) throw new Error("No fue posible generar el PDF");
+  return output;
+}
